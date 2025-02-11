@@ -1,0 +1,1311 @@
+#imports
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import os
+import cupy as cp
+import pickle
+import corner
+
+from stableemrifisher.fisher import StableEMRIFisher
+from stableemrifisher.utils import inner_product, generate_PSD, padding
+
+from few.utils.utility import get_p_at_t
+from few.trajectory.inspiral import EMRIInspiral
+from few.waveform import GenerateEMRIWaveform, Joint_RelativisticKerrCircularFlux
+from few.summation.aakwave import AAKSummation
+from fastlisaresponse import ResponseWrapper  # Response function 
+from few.utils.constants import YRSID_SI, C_SI
+
+from scipy.integrate import quad, nquad
+from scipy.interpolate import RegularGridInterpolator, CubicSpline
+from scipy.stats import uniform
+from scipy.special import factorial
+from scipy.optimize import root
+
+use_gpu = True
+from scipy.stats import multivariate_normal
+
+#lots of supporting utility functions
+
+#cosmology functions
+def H(z,H0,Omega_m0,Omega_Lambda0):
+    """
+    calculate the Hubble parameter at redshift z in m/s/Gpc
+    """
+    return H0 * np.sqrt(Omega_m0*(1+z)**3 + Omega_Lambda0)
+
+def integrand_dc(z,H0,Omega_m0,Omega_Lambda0):
+    return C_SI/H(z,H0,Omega_m0,Omega_Lambda0)
+
+def dc(z,H0,Omega_m0,Omega_Lambda0):
+    """
+    returns the comoving distance in Gpc for a given redshift z
+    """
+    return quad(integrand_dc,0,z,args=(H0,Omega_m0,Omega_Lambda0),epsabs=1e-1,epsrel=1e-1)[0]/1000
+
+def getdistGpc(z,H0,Omega_m0,Omega_Lambda0):
+    """
+    returns the luminosity distance in Gpc for a given redshift z
+    """
+    return (1+z)*dc(z,H0,Omega_m0,Omega_Lambda0)
+
+def dlminusdistz(z, dl, H0,Omega_m0,Omega_Lambda0):
+    return dl - getdistGpc(z,H0,Omega_m0,Omega_Lambda0)
+
+def getz(dl,H0,Omega_m0,Omega_Lambda0):
+    """
+    returns the redshift for a given luminosity distance in Gpc
+    """    
+    return (root(dlminusdistz,x0=0.1,args=(dl,H0,Omega_m0,Omega_Lambda0)).x)[0]
+    
+#source parameter prior pdfs in all three hypotheses
+#supporting functions for prior_vac
+def Mz_func(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
+    return K*(M/Mstar)**alpha*(1+z)**beta*4*np.pi*dc(z,H0,Omega_m0,Omega_Lambda0)**2
+
+def prior_vac(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
+    """
+    given the vacuum hyperparams [K,alpha,beta],
+    calculate the UNNORMALIZED probability distribution function of 
+    obtaining the source params [M,z]
+    """
+    
+    return Mz_func(M,z,K,alpha,beta,H0, Omega_m0,Omega_Lambda0, Mstar)
+
+def prior_loc(vec_l, f, mu_l, sigma_l):
+    """
+    given the local effect hyperparams [f,[mu_Al, mu_nl],[sigma_Al,sigma_nl]],
+    calculate the probability distribution function of 
+    obtaining the source params vec_l = [A_l,n_l]
+    """
+
+    vec_l = np.array(vec_l)
+    mu_l = np.array(mu_l)
+    sigma_l = np.array(sigma_l)
+    
+    Gamma_l = np.diag(1/sigma_l**2)
+
+    return f*np.linalg.det(Gamma_l)**(1/2)/(2*np.pi)*np.exp(-0.5*(vec_l-mu_l)@Gamma_l@(vec_l-mu_l))
+
+def prior_glob(A_g, Gdot, atol=1e-14):
+    """
+    given the global effect hyperparam [Gdot],
+    calculate the probability distribution function of 
+    obtaining the source params vec_g = [A_g]
+    """
+    if np.isclose(A_g,Gdot,rtol=atol, atol=atol):
+        return 1.
+    else:
+        return 0.
+        
+#generating source parameter samples
+def M_z_samples(N,M_range,z_range,lambda_v,grid_size,H0,Omega_m0,Omega_Lambda0,Mstar,seed):
+    """ function to generate N samples of the local effect parameters M, z
+    from M in Mrange, z in zrange, given hyperparameters lambda_v and a grid of size grid_size
+    """
+    
+    np.random.seed(seed)
+
+    K_truth, alpha_truth, beta_truth = lambda_v
+
+    M_grid = uniform.rvs(loc=M_range[0],scale=M_range[1]-M_range[0],size=grid_size) #generating samples first from a uniform grid
+    z_grid = uniform.rvs(loc=z_range[0],scale=z_range[1]-z_range[0],size=grid_size)
+
+    prior_Mz = []
+    for i in range(grid_size):
+        prior_Mz.append(prior_vac(M_grid[i],z_grid[i],K_truth,alpha_truth,beta_truth,H0, Omega_m0,Omega_Lambda0,Mstar))
+    
+    prior_Mz = np.array(prior_Mz)/np.sum(np.array(prior_Mz)) #normalizing
+    
+    #choosing N sources based on the probability distribution
+    indices = range(grid_size)
+    chosen = np.random.choice(indices,size=N,p=prior_Mz)
+    M_samples = M_grid[chosen]
+    z_samples = z_grid[chosen]    
+
+    return M_samples, z_samples
+
+def A_n_samples(N,Al_range,nl_range,lambda_l,grid_size,seed):
+    """ function to generate N samples of the local effect parameters A_l, n_l
+    from A_l in Al_range, n_l in nl_range, given hyperparameters lambda_l and a grid of size grid_size
+    """
+    np.random.seed(seed)
+    
+    f, mu_l, sigma_l = lambda_l
+
+    if f == 0.0:
+        Al_samples = np.zeros(N)
+        nl_samples = np.zeros(N)
+        
+        return Al_samples, nl_samples 
+    
+    Al_grid = uniform.rvs(loc=Al_range[0],scale=Al_range[1]-Al_range[0],size=grid_size)
+    
+    nl_grid = uniform.rvs(loc=nl_range[0],scale=nl_range[1]-nl_range[0],size=grid_size)
+    
+    prior_An = []
+    for i in range(grid_size):
+        prior_An.append(prior_loc([Al_grid[i],nl_grid[i]],f,mu_l,sigma_l))
+    
+    #normalizing the null and non-null parts separately
+    prior_An = np.array(prior_An)/np.sum(np.array(prior_An)) #normalizing
+    
+    #choosing f*N sources based on the probability distribution
+    indices = range(grid_size)
+    chosen = np.random.choice(indices,size=int(f*N),p=prior_An)
+    Al_samples = Al_grid[chosen]
+    nl_samples = nl_grid[chosen]
+    
+    #setting N - f*N sources to have A_l*, n_l* = 0.0
+    Al_samples = np.concatenate((Al_samples,np.zeros(N-len(Al_samples))))
+    nl_samples = np.concatenate((nl_samples,np.zeros(N-len(nl_samples))))
+
+    return Al_samples, nl_samples
+
+def Ag_samples(N,lambda_g):
+    """ function to generate N samples of the global effect parameter Ag
+    given hyperparameter lambda_g
+    """
+    return np.ones(N)*lambda_g #just a Dirac Delta
+
+def other_param_samples(N,M_samples,T_LISA,seed):
+    np.random.seed(seed)
+
+    Trange = [0.5,T_LISA+1.0] #time-to-plunge (from initiation) of the EMRI population. This is an important (but unfortunately FREE) parameter to control the number of observed EMRIs.
+    
+    Tstar = uniform.rvs(loc=Trange[0],scale=Trange[1]-Trange[0],size=N) #randomly choosing time of plunge for the Nth EMRI in the population
+    
+    log10qrange = [-5.5,-4.5] #range of log10 mass ratios
+    qrange = 10**uniform.rvs(loc=log10qrange[0],scale=log10qrange[1]-log10qrange[0],size=N) #samples of mass ratios
+    mustar = M_samples*qrange #samples of CO masses
+    
+    arange = [0.5,0.99] #MBH spin
+    astar = uniform.rvs(loc=arange[0],scale=arange[1]-arange[0],size=N)
+    
+    qSrange = [0.0,np.pi] #polar sky location
+    qSstar = uniform.rvs(loc=qSrange[0],scale=qSrange[1]-qSrange[0],size=N)
+    qKstar = uniform.rvs(loc=qSrange[0],scale=qSrange[1]-qSrange[0],size=N) #polar spin orientation
+    
+    phiSrange = [0.0,2*np.pi] #azimuthal sky location
+    phiSstar = uniform.rvs(loc=phiSrange[0],scale=phiSrange[1]-phiSrange[0],size=N)
+    phiKstar = uniform.rvs(loc=phiSrange[0],scale=phiSrange[1]-phiSrange[0],size=N) #azimuthal spin orientation
+    Phi0star = uniform.rvs(loc=phiSrange[0],scale=phiSrange[1]-phiSrange[0],size=N) #circ-ecc init EMRI phase
+    
+    return mustar, astar, qSstar, qKstar, phiSstar, phiKstar, Phi0star, Tstar
+
+def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,filename):
+    np.random.seed(seed)
+    
+    traj_xy = EMRIInspiral(func="Joint_Relativistic_Kerr_Circ_Flux")
+    
+    p0samps = []
+    
+    for i in tqdm(range(N)):
+        #print(Tsamps[i],Msamps[i],musamps[i],asamps[i],Alsamps[i],nlsamps[i],Agsamps[i])
+        
+        p_plunge = get_p_at_t(traj_xy,
+                              Tsamps[i],
+                              [Msamps[i],
+                               musamps[i],
+                               asamps[i],
+                               0.0, #e0
+                               1.0, #Y0
+                               Alsamps[i],
+                               nlsamps[i],
+                               Agsamps[i],
+                               4.0 #ng
+                              ],
+                              traj_kwargs={'DENSE_STEPPING':0,'err':1e-8, #err reduced because these are just trajs
+                                           'max_init_len':int(1e6)})
+        
+        p0samps.append(p_plunge)
+
+    np.save(f"{filename}/p0samps",p0samps)
+    
+    return np.array(p0samps)
+    
+
+#Fisher Matrix supporting function
+def Jacobian(M,dist,H0,Omega_m0,Omega_Lambda0):
+    """ 
+    Jacobian for Fisher parameter transformation from [M,dist,Al,nl,Ag] to [lnM,z,Al,nl,Ag]
+    Returns a 5x5 diagonal np.ndarray.
+    """
+    
+    #Jacobian = partial old/partial new
+    
+    delta = dist*1e-5
+    del_z_del_dist = ((getz(dist+delta,H0,Omega_m0,Omega_Lambda0)-getz(dist-delta,H0,Omega_m0,Omega_Lambda0))/(2*delta))
+    diag = np.diag((M,(del_z_del_dist)**-1,1.0,1.0,1.0))
+    
+    return diag
+    
+#bias calculation functions
+def bias(psi_signal,phi_signal,multiplicative_factor):
+    """ 
+    Given a true signal with decomposed param set (psi, phi) and the multiplicative factor,
+    calculate the biased param vector psi_bias.
+    (See Eq. 11 in https://arxiv.org/abs/2312.13028)
+    """
+    # d: number of measured source params
+    # Nphi: number of unmeasured params
+    # Npsi: number of measured params
+
+    phi_signal = np.atleast_1d(phi_signal)
+    
+    delta_phi = phi_signal - np.zeros(len(phi_signal)) #1D array - 1D array = 1D array of length Nphi
+        
+    #print(delta_phi)
+    
+    delta_psi = multiplicative_factor@delta_phi # Npsi x Nphi array times Nphi 1D array: 1D array of length Npsi
+    
+    #print(psi_ML)
+
+    return psi_signal + delta_psi # Npsi 1D array + Npsi 1D array = Npsi 1D array
+
+def corner_plot_biases(detected_EMRIs, filename):
+    Fisher_index = []
+    varied_params = []
+    vacuum_params = []
+    local_params = []
+    global_params = []
+    
+    for i in range(len(detected_EMRIs)):
+        varied_params.append(np.array(np.array(detected_EMRIs[i]['transformed_params'])))
+        vacuum_params.append(detected_EMRIs[i]['vacuum_params'])
+        local_params.append(detected_EMRIs[i]['local_params'])
+        global_params.append(detected_EMRIs[i]['global_params'])
+        Fisher_index.append(int(detected_EMRIs[i]['index']))
+        
+    varied_params = np.array(varied_params)
+    vacuum_params = np.array(vacuum_params)
+    local_params = np.array(local_params)
+    global_params = np.array(global_params)
+    Fisher_index = np.array(Fisher_index)
+                
+    params = ['$\\log{M}$','$z$','$A_l$','$n_l$','$A_g$']
+    fig, axs = plt.subplots(len(params),len(params),figsize=(40,40))
+    
+    for i in range(len(params)):
+        for j in range(len(params)):
+            if j < i:
+                axs[i,j].scatter(varied_params[:,j],varied_params[:,i],label='true',s=50)
+                axs[i,j].scatter(vacuum_params[:,j],vacuum_params[:,i],label='vac',s=50)
+                axs[i,j].scatter(local_params[:,j],local_params[:,i],label='loc',s=50)
+                axs[i,j].scatter(global_params[:,j],global_params[:,i],label='global',s=50)
+                
+                axs[i,j].set_xlabel(params[j],fontsize=16)
+                axs[i,j].set_ylabel(params[i],fontsize=16)
+                #axs[i,j].set_xscale('log')
+                #axs[i,j].set_yscale('log')
+            else:
+                axs[i,j].remove()
+    
+    plt.legend(fontsize=15)
+    plt.savefig(f"{filename}/inferred_vs_truth.png",dpi=300,bbox_inches='tight')
+    plt.close()
+
+#source integral prior_vac derivatives
+######## supporting functions ###########################################
+
+def Ddc(z,H0,Omega_m0,Omega_Lambda0):
+    """calculate the first derivative of comoving distance with respect to z"""
+    return integrand_dc(z,H0,Omega_m0,Omega_Lambda0)
+
+def DDdc(z,H0,Om,Ol):
+
+    """
+    Computes the expression:
+    
+    -((3 * c * H0 * Om^(2/3) * (1 + z) * (Om * (1 + z)^3)^(3/2) *
+    (Ol^(4/3) * Om^(1/3) * (1 + z) +
+     3 * H0^(2/3) * Ol^(2/3) * Om^(2/3) * (1 + z)^2 +
+     H0^(4/3) * Om * (1 + z)^3 -
+     2 * H0^(1/3) * Ol * sqrt(Om * (1 + z)^3) -
+     2 * H0 * Ol^(1/3) * Om^(1/3) * (1 + z) * sqrt(Om * (1 + z)^3)))
+     / (2 * (Ol^(1/3) * Om^(1/3) * (1 + z) + H0^(1/3) * sqrt(Om * (1 + z)^3))^2 *
+        (Ol^(2/3) * Om^(1/3) * (1 + z) +
+         H0^(2/3) * Om^(2/3) * (1 + z)^2 -
+         H0^(1/3) * Ol^(1/3) * sqrt(Om * (1 + z)^3))^4))
+
+    Parameters:
+        c, H0, Om, Ol, z : float
+            Constants and variable in the expression
+    """
+    
+    # Numerator terms
+    term1 = Ol ** (4/3) * Om ** (1/3) * (1 + z)
+    term2 = 3 * H0 ** (2/3) * Ol ** (2/3) * Om ** (2/3) * (1 + z) ** 2
+    term3 = H0 ** (4/3) * Om * (1 + z) ** 3
+    term4 = -2 * H0 ** (1/3) * Ol * np.sqrt(Om * (1 + z) ** 3)
+    term5 = -2 * H0 * Ol ** (1/3) * Om ** (1/3) * (1 + z) * np.sqrt(Om * (1 + z) ** 3)
+    
+    numerator = (-3 * C_SI * H0 * Om ** (2/3) * (1 + z) * (Om * (1 + z) ** 3) ** (3/2) *
+                 (term1 + term2 + term3 + term4 + term5))
+
+    # Denominator terms
+    denom1 = Ol ** (1/3) * Om ** (1/3) * (1 + z) + H0 ** (1/3) * np.sqrt(Om * (1 + z) ** 3)
+    denom2 = (Ol ** (2/3) * Om ** (1/3) * (1 + z) +
+              H0 ** (2/3) * Om ** (2/3) * (1 + z) ** 2 -
+              H0 ** (1/3) * Ol ** (1/3) * np.sqrt(Om * (1 + z) ** 3))
+
+    denominator = 2 * denom1 ** 2 * denom2 ** 4
+
+    return numerator / denominator
+
+######## pvac derivatives #########################################################
+def DDM_prior_vac(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
+    C = K*(1/Mstar)**alpha*4*np.pi
+    
+    return C*alpha*(alpha-1)*M**(alpha-2)*(1+z)**beta*dc(z,H0,Omega_m0,Omega_Lambda0)**2
+
+def DDz_prior_vac(M, z, K, alpha, beta,H0,Omega_m0,Omega_Lambda0, Mstar):
+    C = K*(1/Mstar)**alpha*4*np.pi
+
+    """
+    Computes the expression given in Mathematica syntax:
+    
+    (-1 + beta) * beta * C * M^alpha * (1 + z)^(-2 + beta) * dc[z]^2 
+    + 4 * beta * C * M^alpha * (1 + z)^(-1 + beta) * dc[z] * Derivative[1][dc][z] 
+    + 2 * C * M^alpha * (1 + z)^beta * Derivative[1][dc][z]^2 
+    + 2 * C * M^alpha * (1 + z)^beta * dc[z] * (dc''[z])
+    
+    Parameters:
+        beta, C, M, alpha, z : float
+            Constants and variable in the expression
+        dc : float
+            dc[z] (function value at z)
+        Ddc : float
+            Derivative of dc with respect to z (dc'[z])
+        DDdc : float
+            Second derivative of dc with respect to z (dc''[z])
+    """
+
+    term1 = (-1 + beta) * beta * C * M ** alpha * (1 + z) ** (-2 + beta) * dc(z,H0,Omega_m0,Omega_Lambda0)** 2
+    term2 = 4 * beta * C * M ** alpha * (1 + z) ** (-1 + beta) * dc(z,H0,Omega_m0,Omega_Lambda0)* Ddc(z,H0,Omega_m0,Omega_Lambda0)
+    term3 = 2 * C * M ** alpha * (1 + z) ** beta * Ddc(z,H0,Omega_m0,Omega_Lambda0) ** 2
+    term4 = 2 * C * M ** alpha * (1 + z) ** beta * dc(z,H0,Omega_m0,Omega_Lambda0) * DDdc(z,H0,Omega_m0,Omega_Lambda0)
+    
+    return term1 + term2 + term3 + term4
+
+def DMDz_prior_vac(M, z, K, alpha, beta,H0,Omega_m0,Omega_Lambda0, Mstar):
+    C = K*(1/Mstar)**alpha*4*np.pi
+
+    """
+    Computes the expression:
+    
+    alpha * beta * C * M^(-1 + alpha) * (1 + z)^(-1 + beta) * dc[z]^2 
+    + 2 * alpha * C * M^(-1 + alpha) * (1 + z)^beta * dc[z] * Derivative[1][dc][z]
+    
+    Parameters:
+        alpha, beta, C, M, z : float
+            Constants and variable in the expression
+        dc : float
+            dc[z] (function value at z)
+        Ddc : float
+            Derivative of dc with respect to z (dc'[z])
+    """
+    term1 = alpha * beta * C * M ** (-1 + alpha) * (1 + z) ** (-1 + beta) * dc(z,H0,Omega_m0,Omega_Lambda0) ** 2
+    term2 = 2 * alpha * C * M ** (-1 + alpha) * (1 + z) ** beta * dc(z,H0,Omega_m0,Omega_Lambda0) * Ddc(z,H0,Omega_m0,Omega_Lambda0)
+    
+    return term1 + term2
+
+#supporting function for Matrix operations
+def get_minor(matrix, i, j):
+    """Return the minor of the element at row i and column j."""
+    minor = np.delete(matrix, i, axis=0)  # Remove the i-th row
+    minor = np.delete(minor, j, axis=1)  # Remove the j-th column
+    return minor
+
+def cofactor_matrix(matrix):
+    """Compute the cofactor matrix of a square matrix."""
+    if matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("Matrix must be square.")
+    
+    n = matrix.shape[0]
+    cofactor = np.zeros((n, n))
+    
+    for i in range(n):
+        for j in range(n):
+            minor = get_minor(matrix, i, j)
+            cofactor[i, j] = ((-1) ** (i + j)) * np.linalg.det(minor)
+    
+    return cofactor
+    
+#individual source integral terms in all three hypotheses
+#supporting function
+def check_prior(param,bound):
+    """ return True if param within bound (including edges), False otherwise """
+
+    return (param >= bound[0]) & (param <= bound[1])
+
+def Isource_vac(M, z, K, alpha, beta, Fisher, H0,Omega_m0,Omega_Lambda0,Mstar, indices = {'M':0,'z':1}):
+    """ Source Integral approximation in the vacuum-GR hypothesis. 
+    M, z are the inferred source parameters. K, alpha, beta are the hyperparameters.
+    Fisher is the full Fisher matrix in the vac+loc+glob hypothesis at the true parameter point.
+    indices is a dict of indices of the vacuum parameters [M, z] in the Fisher matrix.
+    !! Transform Fisher from M, dl to M, z before calling this function !!
+    """
+        
+    Fisher_vac_inds = np.ix_(list(indices.values()),list(indices.values()))
+    Fisher_vac = Fisher[Fisher_vac_inds]
+    
+    Fisher_vac_inv = np.linalg.inv(Fisher_vac)
+
+    return (prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + (1/2*DDM_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['M'],indices['M']] +
+                                                1/2*DDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['z'],indices['z']] +
+                                                DMDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['M'],indices['z']]))
+
+
+def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda0, Mstar, indices = {'M':0,'z':1,'Ag':-1}):
+    """ Source Integral approximation in the Global effect hypothesis.
+    M, z, Ag are the inferred source parameters. K, alpha, beta, Gdot are the hyperparameters.
+    Fisher is the full Fisher matrix in the vac+loc+glob hypothesis at the true parameter point.
+    indices is a dict of indices of the global parameters [M, z, Ag] in the Fisher matrix.
+    !! Transform Fisher from M, dl to M, z before calling this function !!
+    """
+
+    #getting the Fisher for vac+global effect parameters
+    dpsi = 3 #len(list(indices.keys())) #number of all parameters in the global effect hypothesis.
+    
+    Fisher_psipsi_inds = np.ix_(list(indices.values()),list(indices.values()))
+    Fisher_psipsi = Fisher[Fisher_psipsi_inds]
+
+    #inverse of Fisher_psipsi
+    Fisher_psipsi_inv = np.linalg.inv(Fisher_psipsi)
+
+    #cofactor matrix of Fisher_psipsi
+    cofactor_psipsi = cofactor_matrix(Fisher_psipsi)
+    #print('C_MAg: ',cofactor_psipsi[indices['M'],indices['Ag']])
+    #print('C_zAg: ',cofactor_psipsi[indices['z'],indices['Ag']])
+    
+    #getting the Fisher for vac-only parameters
+    indices_vac = {}
+    for key in list(indices.keys()):
+        if key in ['M','z']:
+            indices_vac[key] = indices[key]
+
+    dv = 2 #len(list(indices_vac.keys()))
+
+    Fisher_vac_inds = np.ix_(list(indices_vac.values()),list(indices_vac.values()))
+    Fisher_vac = Fisher[Fisher_vac_inds]
+
+    Fisher_vac_inv = np.linalg.inv(Fisher_vac)
+
+    #actually calculating the source integral
+    Constant = ((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) #first term
+
+    Expterm = np.exp(-1/2 * np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac) * (Ag-Gdot)**2) #second term
+
+    pvacterm = (prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + ((1/np.linalg.det(Fisher_vac)**2)*\
+                                                                            (1/2*DDM_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*(Fisher_psipsi[0,0]+cofactor_psipsi[indices['M'],indices['Ag']]**2*(Ag-Gdot)**2)
+                                                                      + 1/2*DDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*(Fisher_psipsi[1,1]+cofactor_psipsi[indices['z'],indices['Ag']]**2*(Ag-Gdot)**2)
+                                                                      + DMDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*(-Fisher_psipsi[0,1]+cofactor_psipsi[indices['z'],indices['Ag']]*cofactor_psipsi[indices['M'],indices['Ag']]*(Ag-Gdot)**2))))
+
+    return_val = Constant*Expterm*pvacterm
+
+    if return_val < 1e-50: #underfloat handling
+        return 1e-50
+    else:
+        return return_val
+
+def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_m0,Omega_Lambda0, Mstar, indices = {'M':0, 'z': 1, 'Al':2, 'nl':3}):
+    """
+    Source Integral approximation in the local effect hypothesis.
+    M, z (np.float64) are the inferred vacuum parameters of the source. K, alpha, beta are the corresponding hyperparameters.
+    vec_l (list/numpy 1d.array) = [Al, nl] is the list of inferred local effect parameters of the source.
+    f (np.float64), mu_l = [mu_Al, mu_nl], sigma_l = [sigma_Al, sigma_nl] are the hyperparameters of the local effect.
+    Fisher = Fisher_psipsi with coordinates [lnM, z, Al, nl] 4x4
+    """
+
+    sigma_l = np.array(sigma_l)
+    mu_l = np.array(mu_l)
+    vec_l = np.array(vec_l)
+    
+    Al, nl = vec_l
+    
+    #getting the Fisher for vac+local effect parameters
+    dpsi = len(list(indices.keys()))
+    
+    indices_vac = {}
+    for key in list(indices.keys()):
+        if key in ['M','z']:
+            indices_vac[key] = indices[key]
+
+    dv = len(list(indices_vac.keys()))
+
+    indices_loc = {}
+    for key in list(indices.keys()):
+        if key in ['Al','nl']:
+            indices_loc[key] = indices[key]
+            
+    dl = len(list(indices_loc.keys()))
+    
+    Fisher_psipsi_inds = np.ix_(list(indices.values()),list(indices.values()))
+    Fisher_psipsi = Fisher[Fisher_psipsi_inds] #Full Fisher in vac+local
+
+    Fisher_vac_inds = np.ix_(list(indices_vac.values()),list(indices_vac.values()))
+    Fisher_vac = Fisher[Fisher_vac_inds] #vacuum elements only
+
+    Fisher_loc_inds = np.ix_(list(indices_loc.values()),list(indices_loc.values()))
+    Fisher_loc = Fisher[Fisher_loc_inds]  #local effect elements only
+
+    ### calculating the standardization factor in product of multivariate Gaussians
+    #Fisher_tilde = Fisher_psipsi + [[0,0],[0,Fisher_l]]
+    
+    Fisher_l = np.diag(1/sigma_l**2)
+
+    Fisher_tilde_additional = np.zeros_like(Fisher_psipsi)
+    Fisher_tilde_additional[dl:,dl:] = Fisher_l
+
+    Fisher_tilde = Fisher_psipsi + Fisher_tilde_additional #Fisher_tilde
+
+    #psitilde
+    psi_tilde_additional = np.zeros(dpsi)
+    psi_tilde_additional[dl:] = Fisher_l@mu_l
+
+    psi_vec = np.array([np.log(M),z,Al,nl])
+                
+    psi_tilde = np.linalg.inv(Fisher_tilde)@(Fisher_psipsi@psi_vec  + psi_tilde_additional) #psi_tilde
+    
+    lnM_tilde, z_tilde = psi_tilde[:dv] #v_tilde for I2 evaluation
+    
+    #standardization factor
+    S = np.linalg.det(Fisher_loc+Fisher_l)**(1/2)/((2*np.pi)**(dpsi/2))*np.exp(-1/2*(vec_l - mu_l)@(Fisher_loc+Fisher_l)@(vec_l - mu_l))
+
+    ### Calculating the source terms
+    I1 = (1-f)*((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2))*Isource_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, Fisher=Fisher,H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)
+
+    #print(np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))
+    
+    I2 = S*f*Isource_vac(M=np.exp(lnM_tilde), z=z_tilde, K=K, alpha=alpha, beta=beta, Fisher=Fisher, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)
+
+    #print(((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)))
+    
+    return I1 + I2
+        
+#####################################################################################################
+#####################################################################################################
+### MAIN CLASS DEFINITION ###
+#####################################################################################################
+#####################################################################################################
+
+class Hierarchical:
+
+    def __init__(self, Npop, SNR_thresh, sef_kwargs,
+                       filename,filename_Fishers=None,
+                       true_hyper={'K':5e-3,'alpha':0.0,'beta':0.0,
+                                   'f':0.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':0.8,
+                                   'Gdot':0.0},
+                       cosmo_params={'Omega_m0':0.30,'Omega_Lambda0':0.70,'H0':70e3}, 
+                       source_bounds={'M':[1e4,1e7],'z':[0.01,10.0],'Al':[0.0,1e-4],'nl':[0.0,10.0],'Ag':[0.0,1e-8]},
+                       hyper_bounds={'K':[1e-3,1e-2],'alpha':[-0.5,0.5],'beta':[-0.5,0.5],
+                                     'f':[0.0,1.0],'mu_Al':[1e-5,1e-5],'mu_nl':[8.0,8.0],'sigma_Al':[1e-6,1e-6],'sigma_nl':[0.8,0.8],
+                                     'Gdot':[0.0,1e-8]},
+                       T_LISA = 1.0, dt = 10.0, Mstar = 3e6,
+                       M_random = int(1e4),
+                       make_nice_plots=False,
+                       random_seed=42):
+        
+        """
+            This class generates a population of extreme-mass-ratio inspirals (EMRIs) 
+            for a fiducial set of hyperparameters on local and global perturbative effects on top of vacuum evolution 
+            and calculates the approximate Bayes factor (Savage-Dickey ratio) comparing 
+            three hypothesis: vacuum, vac+local effect only, vac+global effect only.
+
+        Args:
+            Npop (int): Number of EMRIs in the true population.
+            SNR_thresh (float): Signal-to-noise ratio threshold to claim 'detected' EMRI set.
+            sef_kwargs (dict): keyword arguments to provide to the StableEMRIFishers class. Must include:
+                               'EMRI_waveform_gen', 'param_names'. All others optional.
+
+            filename (string): folder name where the data is being stored. No default because impractical to not save results.
+            filename_Fisher (string): a sub-folder for storing Fisher files (book-keeping). If None, Fishers directly stored in filename. Default is None. 
+
+            true_hyper (dict): true values of all hyperparameters. Default are fiducial values consistent with a population of vacuum EMRIs.
+            cosmo_params (dict): true values of 'Omega_m0' (matter density), 'Omega_Lambda0' (DE density), and 'H0' (Hubble constant in m/s/Gpc).
+
+            source_bounds (dict): prior range on source parameters in all three hypotheses. Must be provided for all parameters. We assume flat priors in this range.
+            hyper_bounds (dict): prior range on population (hyper)params in all three hypotheses. Must be provided for all hyperparams. We assume flat priors in this range.
+            
+            T_LISA (float): time (in years) of LISA observation window. Default is 1.0.
+            dt (float): LISA sampling frequency. Default is 1.0.
+            Mstar (float) Constant in prior_vac. Default is 3e6. We choose it here following https://arxiv.org/pdf/1703.09722. Future implementations can vary this also.
+
+            M_random (int): Number of random samples for Savage-Dickey ratio calculation. Default is int(1e4).
+            
+            make_nice_plots (bool): Make and save visualizations: scatterplots of source param distributions, inferred bias corner plots, source integrals as a function
+                                    function of hyperparameters, etc.
+            
+            random_seed (int or None): seed for random processes throughout the code. If NoneType, no seed is implemented. Default is 42.
+        
+        Returns:
+            Bvac_loc (float): Savage-Dickey ratio preferring the vacuum 
+            Bvac_glob (float): Savage-Dickey ratio preferring the vacuum over the global hypothesis.
+            Bloc_glob (float): Savage-Dickey ratio preferring the local over the global hypothesis.
+        """
+
+        if isinstance(Npop, int):
+            self.Npop = Npop
+        else:
+            raise ValueError("Npop must be an integer > 0.")
+
+        self.SNR_thresh = SNR_thresh
+
+        self.filename = filename
+        self.filename_Fishers = os.path.join(self.filename,filename_Fishers)
+        self.sef_kwargs = sef_kwargs
+        self.sef_kwargs['filename'] = self.filename_Fishers
+
+        #true cosmology
+        self.Omega_m0 = cosmo_params['Omega_m0']
+        self.Omega_Lambda0 = cosmo_params['Omega_Lambda0']
+        self.H0 = cosmo_params['H0']
+
+        #true population hyperparams.
+        # K, alpha, beta are vacuum population hyperparameters
+        # f, mu_Al, mu_nl, sigma_Al, sigma_nl are local-effect population hyperparameters
+        # Gdot is the global-effect population hyperparameter.
+        self.K_truth = true_hyper['K']
+        self.alpha_truth = true_hyper['alpha']
+        self.beta_truth = true_hyper['beta']
+        self.Mstar_truth = Mstar
+        self.lambda_truth_vac = [self.K_truth,self.alpha_truth,self.beta_truth]
+        
+        self.f_truth = true_hyper['f']
+        self.mu_Al_truth = true_hyper['mu_Al']
+        self.mu_nl_truth = true_hyper['mu_nl']
+        self.sigma_Al_truth = true_hyper['sigma_Al']
+        self.sigma_nl_truth = true_hyper['sigma_nl']
+        self.lambda_truth_loc = [self.f_truth,[self.mu_Al_truth,self.mu_nl_truth],[self.sigma_Al_truth,self.sigma_nl_truth]]
+        
+        self.Gdot_truth = true_hyper['Gdot']
+        self.lambda_truth_glob = [self.Gdot_truth]
+
+        #prior ranges on source parameters
+        self.source_bounds = source_bounds
+        self.M_range = source_bounds['M']
+        self.z_range = source_bounds['z']
+        self.Al_range = source_bounds['Al']
+        self.nl_range = source_bounds['nl']
+        self.Ag_range = source_bounds['Ag']
+
+        #prior ranges on population (hyper)params
+        self.hyper_bounds = hyper_bounds
+        self.K_range = hyper_bounds['K']
+        self.alpha_range = hyper_bounds['alpha']
+        self.beta_range = hyper_bounds['beta']
+        self.f_range = hyper_bounds['f']
+        self.mu_Al_range = hyper_bounds['mu_Al']
+        self.mu_nl_range = hyper_bounds['mu_nl']
+        self.sigma_Al_range = hyper_bounds['sigma_Al']
+        self.sigma_nl_range = hyper_bounds['sigma_nl']
+        self.Gdot_range = hyper_bounds['Gdot']
+
+        self.T_LISA = T_LISA
+        self.dt = dt
+
+        self.M_random = M_random
+        
+        self.make_nice_plots = make_nice_plots
+
+        if self.make_nice_plots:
+            self.plots_folder = os.path.join(self.filename, "fancy_plots")
+            os.makedirs(self.plots_folder, exist_ok=True)
+
+        self.seed = random_seed
+
+    def __call__(self):
+
+        ###########################################################################
+        #generate a population according to prior distribution of model parameters
+        #and the true values of population parameters
+        ###########################################################################
+
+        grid_size = int(1e4) #harcoded because does not matter as long as reasonably large.
+
+        #generating vacuum parameter samples
+        self.M_truth_samples, self.z_truth_samples = M_z_samples(N=self.Npop,
+                                                                 M_range=self.M_range,z_range=self.z_range,
+                                                                 lambda_v=self.lambda_truth_vac,grid_size=grid_size,
+                                                                 H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth,
+                                                                 seed=self.seed)
+
+        if self.make_nice_plots:
+            plt.figure(figsize=(7,5))
+            plt.scatter(np.log10(self.M_truth_samples),self.z_truth_samples,color='grey',alpha=0.5)
+            plt.xlabel(r"$\log_{10}$(MBH masses M)",fontsize=16)
+            plt.ylabel("redshifts z", fontsize=16)
+            plt.title("True population",fontsize=16)
+            plt.savefig(f'{self.plots_folder}/M_z_truth.png',dpi=300,bbox_inches='tight')
+            plt.close()
+        
+        #generating local effect parameters samples
+        self.Al_truth_samples, self.nl_truth_samples = A_n_samples(N=self.Npop,Al_range=self.Al_range,nl_range=self.nl_range,lambda_l=self.lambda_truth_loc,grid_size=grid_size,seed=self.seed)
+        
+        if self.make_nice_plots:
+            plt.figure(figsize=(7,5))
+            plt.scatter(self.Al_truth_samples,self.nl_truth_samples,color='grey',alpha=0.5)
+            plt.xlabel(r"local-effect amp $A_l$",fontsize=16)
+            plt.ylabel(r"local-effect slope $n_l$", fontsize=16)
+            plt.title("True population",fontsize=16)
+            plt.savefig(f'{self.plots_folder}/Al_nl_truth.png',dpi=300,bbox_inches='tight')
+            plt.close()
+
+        
+        #generating global effect parameter samples 
+        self.Ag_truth_samples = Ag_samples(N=self.Npop,lambda_g=self.lambda_truth_glob)
+
+        if self.make_nice_plots:
+            plt.figure(figsize=(7,5))
+            plt.plot(self.Ag_truth_samples,color='grey')
+            plt.ylabel(r"global-effect amp $A_g$", fontsize=16)
+            plt.xlabel("Source index",fontsize=16)
+            plt.title("True population",fontsize=16)
+            plt.savefig(f'{self.plots_folder}/Ag_truth.png',dpi=300,bbox_inches='tight')
+            plt.close()
+
+        #generating all other model parameter samples
+        (self.mu_truth_samples,
+         self.a_truth_samples,
+         self.qS_truth_samples,
+         self.qK_truth_samples,
+         self.phiS_truth_samples,
+         self.phiK_truth_samples,
+         self.Phi0_truth_samples,
+         self.T_truth_samples) = other_param_samples(N=self.Npop,M_samples=self.M_truth_samples,T_LISA=self.T_LISA,seed=self.seed)
+        
+        try:
+            self.p0_truth_samples = np.load(f"{self.filename}/p0samps.npy")
+            print("p0 samples found")
+        except FileNotFoundError:
+            print("calculating p0 samples")
+            self.p0_truth_samples = p0_samples_func(N=self.Npop,Msamps=self.M_truth_samples,
+                                                    musamps=self.mu_truth_samples,
+                                                    asamps=self.a_truth_samples,
+                                                    Alsamps=self.Al_truth_samples,
+                                                    nlsamps=self.nl_truth_samples,
+                                                    Agsamps=self.Ag_truth_samples,
+                                                    Tsamps=self.T_truth_samples,
+                                                    seed=self.seed,
+                                                    filename=self.filename)
+
+        if self.make_nice_plots:
+            plt.figure(figsize=(7,5))
+            plt.scatter(np.log10(self.mu_truth_samples/self.M_truth_samples),self.p0_truth_samples,color='grey',alpha=0.5)
+            plt.xlabel(r"$\log_{10}$(Mass ratio)",fontsize=16)
+            plt.ylabel(r"$p_0$", fontsize=16)
+            plt.title("True population",fontsize=16)
+            plt.savefig(f'{self.plots_folder}/q_p0_truth.png',dpi=300,bbox_inches='tight')
+            plt.close()
+
+        #####################################################################
+        #extracting the detected population using SNR threshold calculation
+        #####################################################################
+        try:
+            self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy',allow_pickle=True)
+        except FileNotFoundError:
+            print("Calculating FIMs for the detectable EMRI population.")
+            self.calculate_detected()
+
+        #print(self.detected_EMRIs)
+
+        ####################################################################
+        #transforming the Fishers from [M,dL,Al,nl,Ag] to [logM,z,Al,nl,Ag]
+        ####################################################################
+
+        Fisher_index = []
+        varied_params = []
+        for i in range(len(self.detected_EMRIs)):
+            varied_params.append(np.array(np.array(self.detected_EMRIs[i]['transformed_params'])))
+            Fisher_index.append(int(self.detected_EMRIs[i]['index']))
+            
+        varied_params = np.array(varied_params)
+        Fisher_index = np.array(Fisher_index)
+
+        for index, i in zip(Fisher_index,range(len(Fisher_index))):
+            Fisher_i = np.load(f"{self.filename_Fishers}/Fisher_{index}.npy")
+            dist_i = getdistGpc(self.detected_EMRIs[i]['true_params'][6],self.H0,self.Omega_m0,self.Omega_Lambda0)
+            M_i = self.detected_EMRIs[i]['true_params'][0]
+            
+            J = Jacobian(M_i, dist_i,self.H0,self.Omega_m0,self.Omega_Lambda0)
+            
+            Fisher_transformed = J.T@Fisher_i@J
+        
+            np.save(f"{self.filename_Fishers}/Fisher_transformed_{index}",Fisher_transformed)
+            #print(np.linalg.eigvals(Fisher_i))
+            #print(np.linalg.eigvals(Fisher_transformed))
+
+        ##################################################################
+        #calculating the biased inferrence params in all three hypotheses
+        ##################################################################
+    
+        self.inferred_params(hypothesis='vacuum')         
+        self.inferred_params(hypothesis='local')         
+        self.inferred_params(hypothesis='global')
+
+        if self.make_nice_plots:
+            corner_plot_biases(self.detected_EMRIs, self.plots_folder)
+
+        #############################################
+        #calculating the Savage-Dickey ratios in different hypotheses        
+        #############################################
+
+        #savage-dickey preferring the vacuum hypothesis over local
+        Bvac_loc = self.savage_dickey_vacloc()
+        #print("Preference for vacuum over local: ", Bvac_loc)
+
+        Bvac_glob = self.savage_dickey_vacglob()
+        #print("Preference for vacuum over global: ", Bvac_glob)
+
+        Bglob_loc = Bvac_loc/Bvac_glob
+        #print("Preference for global over local: ", Bglob_loc)
+
+        np.savetxt(f"{self.filename}/SD_ratios.txt",np.array([Bvac_loc,Bvac_glob,Bglob_loc]))
+
+        return Bvac_loc, Bvac_glob, Bglob_loc
+
+    def calculate_detected(self):
+        """ calculate the SNRs of the sources in the population. For sources with SNR > thresh,
+        calculate and save the FIMs and parameter values. """
+        
+        self.detected_EMRIs = []
+        all_SNRs = []
+                
+        for i in tqdm(range(self.Npop)):
+            M = self.M_truth_samples[i]
+            mu = self.mu_truth_samples[i]
+            a = self.a_truth_samples[i]
+            e0 = 0.0
+            Y0 = 1.0
+            dL = getdistGpc(self.z_truth_samples[i],self.H0,self.Omega_m0,self.Omega_Lambda0) #Gpc
+            
+            qS = self.qS_truth_samples[i]
+            phiS = self.phiS_truth_samples[i]
+            qK = self.qK_truth_samples[i]
+            phiK = self.phiK_truth_samples[i]
+            Phi_phi0 = self.Phi0_truth_samples[i]
+            Phi_theta0 = 0.0
+            Phi_r0 = 0.0
+            T = self.T_LISA #all sources plunge at or after T_LISA, so the observation window is T_LISA at max.
+            dt = self.dt
+
+            Al = self.Al_truth_samples[i]
+            nl = self.nl_truth_samples[i]
+
+            Ag = self.Ag_truth_samples[i]
+            ng = 4.0
+
+            p0 = self.p0_truth_samples[i]
+
+            self.sef_kwargs['suffix'] = i
+
+            param_list = [M,mu,a,p0,e0,Y0,
+                          dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
+                          Al,nl,Ag,ng] #SEF param args
+            
+            param_save = [M,mu,a,p0,e0,Y0,
+                          self.z_truth_samples[i],qS,phiS,qK,phiK,
+                          Phi_phi0,Phi_theta0,Phi_r0,
+                          Al,nl,Ag,ng] #to be saved (work in z-only, NOT dL)
+
+            transformed_params = [np.log(M),self.z_truth_samples[i],Al,nl,Ag]
+            
+            emri_kwargs = {'T': T, 'dt': dt}
+
+            #print(param_list, self.T_truth_samples[i])
+            
+            sef = StableEMRIFisher(*param_list, **emri_kwargs, **self.sef_kwargs)
+            all_SNRs.append(sef.SNRcalc_SEF())
+
+            if all_SNRs[i] >= self.SNR_thresh:
+                self.detected_EMRIs.append({'index': i,'true_params': np.array(param_list),'SNR':all_SNRs[i], 
+                                            'lambda_v':self.lambda_truth_vac, 'lambda_l':self.lambda_truth_loc, 'lambda_g':self.lambda_truth_glob,
+                                           'transformed_params':np.array(transformed_params)})
+                try:
+                    _ = np.load(f"{self.filename_Fishers}/Fisher_{i}.npy")
+                except FileNotFoundError:
+                    sef() #calculate and save the FIM for the detected EMRI
+
+        all_SNRs = np.array(all_SNRs)
+        self.detected_EMRIs = np.array(self.detected_EMRIs)
+        np.save(f"{self.filename}/detected_EMRIs",self.detected_EMRIs)
+        np.savetxt(f"{self.filename}/all_SNRs.txt",np.array(all_SNRs))
+
+        print(f"#detected EMRIs: {len(self.detected_EMRIs)}")
+
+        if self.make_nice_plots:
+            plt.hist(all_SNRs,bins=100,color='grey',label="All EMRIs")
+            plt.hist(all_SNRs[all_SNRs >= self.SNR_thresh],bins=100,color='red',label="Detected EMRIs")
+            plt.axvline(self.SNR_thresh,color='k',linestyle='--',label='SNR threshold')
+            plt.legend()
+            plt.xlabel("SNRs",fontsize=16)
+            plt.yscale("log")
+            plt.savefig(f"{self.plots_folder}/SNR_dist.png",dpi=300,bbox_inches='tight')
+            plt.close()
+
+    def inferred_params(self,hypothesis='vacuum'):
+        """ calculate and save the inferred biased params in the given hypothesis.
+        choose between 'vacuum', 'local', or 'global' 
+        """
+        
+        for i in range(len(self.detected_EMRIs)):
+        
+            # d: number of measured source params
+            # Nphi: number of unmeasured params
+            # Npsi: number of measured params
+        
+            index = int(self.detected_EMRIs[i]["index"])
+            Gamma_i = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+    
+            if hypothesis == 'vacuum':
+                #vacuum hypothesis
+                indices_psi = [0,1]  #indices of measured params
+                indices_phi = [2,3,4] #indices of unmeasured params
+                
+                i_psipsi = np.ix_(indices_psi,indices_psi)
+                i_psiphi = np.ix_(indices_psi,indices_phi)
+                i_phiphi = np.ix_(indices_phi,indices_phi) 
+                
+                Gamma_i_psipsi_inv = np.linalg.inv(Gamma_i[i_psipsi]) # Npsi x Npsi array
+                Gamma_i_psiphi = Gamma_i[i_psiphi] # Npsi x Nphi array
+            
+                multiplicative_factor = Gamma_i_psipsi_inv@Gamma_i_psiphi # Npsi x Nphi array
+                
+                psi_i = np.array(self.detected_EMRIs[i]["transformed_params"])[indices_psi] #Npsi 1D array
+                phi_i = np.array(self.detected_EMRIs[i]["transformed_params"])[indices_phi] #Nphi 1D array
+    
+                psi_i_inferred = bias(psi_i, phi_i, multiplicative_factor)
+                psi_i_inferred = np.concatenate((psi_i_inferred,[0.0,0.0,0.0])) #size = Npsi + Nphi
+    
+                self.detected_EMRIs[i]["vacuum_params"] = np.array(psi_i_inferred) #save [lnM_bias,z_bias]
+    
+            if hypothesis == 'local':
+                #local hypothesis
+                indices_psi = [0,1,2,3]  #indices of measured params
+                indices_phi = [4] #indices of unmeasured params
+                
+                i_psipsi = np.ix_(indices_psi,indices_psi)
+                i_psiphi = np.ix_(indices_psi,indices_phi)
+                i_phiphi = np.ix_(indices_phi,indices_phi) 
+                
+                Gamma_i_psipsi_inv = np.linalg.inv(Gamma_i[i_psipsi]) # Npsi x Npsi array
+                Gamma_i_psiphi = Gamma_i[i_psiphi] # Npsi x Nphi array
+            
+                multiplicative_factor = Gamma_i_psipsi_inv@Gamma_i_psiphi # Npsi x Nphi array
+                
+                psi_i = np.array(self.detected_EMRIs[i]["transformed_params"])[indices_psi] #Npsi 1D array
+                phi_i = np.array(self.detected_EMRIs[i]["transformed_params"])[indices_phi] #Nphi 1D array
+    
+                psi_i_inferred = bias(psi_i, phi_i, multiplicative_factor)
+                """
+                if psi_i_inferred[2] < 1e-14:
+                    psi_i_inferred[2] = 1e-14 #Al cannot be negative.
+                    psi_i_inferred[3] = 1e-14
+                if psi_i_inferred[3] < 1e-14:
+                    psi_i_inferred[3] = 1e-14 #nl cannot be negative.
+                    psi_i_inferred[2] = 1e-14
+                """
+                psi_i_inferred = np.concatenate((psi_i_inferred,[0.0])) #size = Npsi + Nphi
+    
+                self.detected_EMRIs[i]["local_params"] = np.array(psi_i_inferred) #save [lnM_bias,z_bias,Al_bias, nl_bias]
+    
+            if hypothesis == 'global':
+                #global hypothesis
+                indices_psi = [0,1,4]  #indices of measured params
+                indices_phi = [2,3] #indices of unmeasured params
+                
+                i_psipsi = np.ix_(indices_psi,indices_psi)
+                i_psiphi = np.ix_(indices_psi,indices_phi)
+                i_phiphi = np.ix_(indices_phi,indices_phi) 
+    
+                Gamma_i_psipsi_inv = np.linalg.inv(Gamma_i[i_psipsi]) # Npsi x Npsi array
+                Gamma_i_psiphi = Gamma_i[i_psiphi] # Npsi x Nphi array
+    
+                multiplicative_factor = Gamma_i_psipsi_inv@Gamma_i_psiphi # Npsi x Nphi array
+    
+                psi_i = np.array(self.detected_EMRIs[i]["transformed_params"])[indices_psi] #Npsi 1D array
+                phi_i = np.array(self.detected_EMRIs[i]["transformed_params"])[indices_phi] #Nphi 1D array
+    
+                psi_i_inferred = bias(psi_i, phi_i, multiplicative_factor)
+                """
+                if psi_i_inferred[-1] < 1e-14:
+                    psi_i_inferred[-1] = 1e-14 #global effect cannot be negative.
+                """
+                psi_i_inferred = np.concatenate((np.concatenate((psi_i_inferred[:2],[0.0,0.0])),[psi_i_inferred[-1]]))
+                
+                self.detected_EMRIs[i]["global_params"] = np.array(psi_i_inferred) #save [lnM_bias,z_bias,Ag_bias]
+
+        self.Nobs = len(self.detected_EMRIs) #number of detected EMRIs.
+        np.save(f'{self.filename}/detected_EMRIs',self.detected_EMRIs)
+
+    def source_integral_vac(self,K,alpha,beta):
+        
+        """Calculate the source integral in the vacuum hypothesis.
+        bounds_vac is a dict of bounds on M and z. Bounds can be given for any subset of the parameters."""
+                
+        #calculate source integral
+        Ivac_all = []
+
+        Nobs = self.Nobs
+
+        bounds_vac = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z']}
+    
+        for i in range(len(self.detected_EMRIs)):
+            index = int(self.detected_EMRIs[i]["index"])
+            Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+    
+            vacparams = self.detected_EMRIs[i]["vacuum_params"] # logMvac, zvac, Alvac, nlvac, Agvac
+    
+            out_of_bound = False
+    
+            for param,i in zip(bounds_vac.keys(),range(len(bounds_vac.keys()))):
+                if not check_prior(vacparams[i],bounds_vac[param]): #if the source is outside the prior bound after incurring inference biasese
+                    print(f"source {index} is out of prior bounds on {param}. \n\
+                            Parameter value: {vacparams[i]}. Bound: {bounds_vac[param]}. \n\
+                            Removing from list of detections.")
+                    out_of_bound = True
+                    break
+    
+            if out_of_bound:
+                Ivac_all.append(1.0)
+                Nobs -= 1
+    
+            else:    
+                Ivac_all.append(Isource_vac(M=np.exp(vacparams[0]),z=vacparams[1], 
+                                K=K, alpha=alpha, beta=beta, #variable hyperparameters
+                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth))
+    
+        return factorial(Nobs-1)*np.prod(np.array(Ivac_all))
+
+    def source_integral_loc(self,K,alpha,beta,f,mu_Al,mu_nl,sigma_Al,sigma_nl):
+        
+        """Calculate the source integral in the local hypothesis.
+        bounds_loc is a dict of bounds on M, z, Al, nl. Bounds can be given for any subset of the parameters."""
+            
+        Nobs = self.Nobs
+        
+        #calculate source integral
+        Iloc_all = []
+
+        bounds_loc = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
+                      'Al':self.source_bounds['Al'],'nl':self.source_bounds['nl']}
+    
+        for i in range(len(self.detected_EMRIs)):
+            index = int(self.detected_EMRIs[i]["index"])
+            Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+    
+            locparams = self.detected_EMRIs[i]["local_params"] # logMloc, zloc, Alloc, nlloc, Agloc
+    
+            out_of_bound = False
+    
+            for param,i in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
+                if not check_prior(locparams[i],bounds_loc[param]): #if the source is outside the prior bound
+                    print(f"source {index} is out of prior bounds on {param}. \n\
+                            Parameter value: {locparams[i]}. Bound: {bounds_loc[param]}. \n\
+                            Removing from list of detections.")
+                    out_of_bound = True
+                    break
+    
+            if out_of_bound:
+                Iloc_all.append(1.0)
+                Nobs -= 1
+    
+            else:    
+                Iloc_i = Isource_loc(M=np.exp(locparams[0]),z=locparams[1], vec_l=[locparams[2],locparams[3]], 
+                                K=K, alpha=alpha, beta=beta, 
+                                f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
+                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
+                                Mstar=self.Mstar_truth)
+
+                if np.isnan(Iloc_i):
+                    Iloc_all.append(1.0)
+                    Nobs -= 1
+                else:
+                    Iloc_all.append(Iloc_i)
+
+        lnposterior = np.sum(np.log(np.array(Iloc_all))) #avoid overflow by calculating log posterior
+        
+        return Nobs, lnposterior
+
+    def source_integral_glob(self,K,alpha,beta,Gdot):
+        
+        """Calculate the source integral in the global hypothesis.
+        bounds_loc is a dict of bounds on M, z, Al, nl. Bounds can be given for any subset of the parameters."""
+            
+        Nobs = self.Nobs
+        
+        #calculate source integral
+        Iglob_all = []
+
+        bounds_glob = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
+                      'Ag':self.source_bounds['Ag']}
+    
+        for i in range(len(self.detected_EMRIs)):
+            index = int(self.detected_EMRIs[i]["index"])
+            Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+    
+            globparams = self.detected_EMRIs[i]["global_params"] # logMglob, zglob, Alglob, nlglob, Agglob
+            
+            out_of_bound = False
+    
+            for param,i in zip(bounds_glob.keys(),[0,1,4]):
+                if not check_prior(globparams[i],bounds_glob[param]): #if the source is outside the prior bound
+                    print(f"source {index} is out of prior bounds on {param}. \n\
+                            Parameter value: {globparams[i]}. Bound: {bounds_glob[param]}. \n\
+                            Removing from list of detections.")
+                    out_of_bound = True
+                    break
+    
+            if out_of_bound:
+                Iglob_all.append(1.0)
+                Nobs -= 1
+    
+            else:    
+                Iglob_i = Isource_glob(M=np.exp(globparams[0]),z=globparams[1],Ag=globparams[-1],
+                                      K=K, alpha=alpha, beta=beta, 
+                                      Gdot=Gdot,Mstar=self.Mstar_truth,
+                                      Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+                if np.isnan(Iglob_i):
+                    Iglob_all.append(1.0)
+                    Nobs -= 1
+                else:
+                    Iglob_all.append(Iglob_i)
+
+        lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
+
+        return Nobs, lnposterior
+
+    def savage_dickey_vacloc(self):
+        #no seed ideally required for this calculation
+        seed = self.seed
+        
+        K_samples = uniform.rvs(loc=self.K_range[0],scale=self.K_range[1]-self.K_range[0],size=self.M_random)
+        
+        alpha_samples = uniform.rvs(loc=self.alpha_range[0],scale=self.alpha_range[1]-self.alpha_range[0],size=self.M_random)
+        
+        beta_samples = uniform.rvs(loc=self.beta_range[0],scale=self.beta_range[1]-self.beta_range[0],size=self.M_random)
+    
+        f_samples = uniform.rvs(loc=self.f_range[0],scale=self.f_range[1]-self.f_range[0],size=self.M_random)
+    
+        mu_Al_samples = uniform.rvs(loc=self.mu_Al_range[0],scale=self.mu_Al_range[1]-self.mu_Al_range[0],size=self.M_random)
+        mu_nl_samples = uniform.rvs(loc=self.mu_nl_range[0],scale=self.mu_nl_range[1]-self.mu_nl_range[0],size=self.M_random)
+    
+        sigma_Al_samples = uniform.rvs(loc=self.sigma_Al_range[0],scale=self.sigma_Al_range[1]-self.sigma_Al_range[0],size=self.M_random)
+        sigma_nl_samples = uniform.rvs(loc=self.sigma_nl_range[0],scale=self.sigma_nl_range[1]-self.sigma_nl_range[0],size=self.M_random)
+
+        lnprodIsource = []
+        removed_indices = []
+        for j in tqdm(range(self.M_random)):
+                
+            Nobs, lnprodIsource_j = self.source_integral_loc(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
+                                             f=f_samples[j], mu_Al=mu_Al_samples[j], mu_nl=mu_nl_samples[j],
+                                             sigma_Al=sigma_Al_samples[j], sigma_nl=sigma_nl_samples[j])
+            lnprodIsource.append(np.log(factorial(Nobs-1))+lnprodIsource_j)
+            #else:
+            #    removed_indices.append(j) #overflow indices
+                
+        #K_samples = np.delete(K_samples,removed_indices)
+        #alpha_samples = np.delete(alpha_samples,removed_indices)
+        #beta_samples = np.delete(beta_samples,removed_indices)
+        #f_samples = np.delete(f_samples,removed_indices)
+        #mu_Al_samples = np.delete(mu_Al_samples,removed_indices)
+        #mu_nl_samples = np.delete(mu_nl_samples,removed_indices)
+        #sigma_Al_samples = np.delete(sigma_Al_samples,removed_indices)
+        #sigma_nl_samples = np.delete(sigma_nl_samples,removed_indices)
+    
+        lnprodIsource = np.array(lnprodIsource) - np.max(lnprodIsource)
+        prodIsource = np.exp(lnprodIsource)
+        prodIsource = prodIsource/np.sum(prodIsource)
+        #f=0 mask
+        num_bins = 50
+        mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
+        
+        while sum(mask) < 5: #make sure at least five sample point in the null hypothesis.
+            warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
+            num_bins -= 10
+            mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
+            
+        prior_f0 = sum(mask)/len(prodIsource) #prior number of points within the bin for f = 0 
+        posterior_f0 = np.sum(prodIsource[mask])
+    
+        print("prior_f0: ", prior_f0)
+        print("posterior_f0: ", posterior_f0)
+
+        if self.make_nice_plots:
+            plt.figure(figsize=(7,5))
+            plt.scatter(f_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
+            plt.scatter(f_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.axvline(self.f_truth,color='k',linestyle='--',label='truth')
+            plt.xlabel("fraction of local-effect EMRIs (f)", fontsize=16)
+            plt.ylabel("posterior pdf p(f|data)",fontsize=16)
+            plt.yscale('log')
+            plt.legend()
+            plt.savefig(f"{self.plots_folder}/posterior_vac_loc.png",dpi=300,bbox_inches='tight')
+            plt.close()
+        
+        return posterior_f0/prior_f0
+    
+    def savage_dickey_vacglob(self):
+        np.random.seed(self.seed)
+
+        K_samples = uniform.rvs(loc=self.K_range[0],scale=self.K_range[1]-self.K_range[0],size=self.M_random)
+        
+        alpha_samples = uniform.rvs(loc=self.alpha_range[0],scale=self.alpha_range[1]-self.alpha_range[0],size=self.M_random)
+        
+        beta_samples = uniform.rvs(loc=self.beta_range[0],scale=self.beta_range[1]-self.beta_range[0],size=self.M_random)
+        
+        Gdot_samples = uniform.rvs(loc=self.Gdot_range[0],scale=self.Gdot_range[1]-self.Gdot_range[0],size=self.M_random)
+    
+        lnprodIsource = []
+        #removed_indices = []
+        for j in tqdm(range(self.M_random)):
+                
+            Nobs, lnprodIsource_j = self.source_integral_glob(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
+                                                  Gdot=Gdot_samples[j])
+
+            #print(K_samples[j], alpha_samples[j], beta_samples[j], Gdot_samples[j], prodIsource_j)
+    
+            lnprodIsource.append(np.log(factorial(Nobs-1))+lnprodIsource_j)
+            
+            #else:
+            #    removed_indices.append(j) #overflow indices
+
+        #K_samples = np.delete(K_samples,removed_indices)
+        #alpha_samples = np.delete(alpha_samples,removed_indices)
+        #beta_samples = np.delete(beta_samples,removed_indices)
+
+        #Gdot_samples = np.delete(Gdot_samples,removed_indices)
+    
+        lnprodIsource = np.array(lnprodIsource) - np.max(lnprodIsource)
+        prodIsource = np.exp(lnprodIsource)
+        prodIsource = prodIsource/np.sum(prodIsource)
+        #Gdot=0 mask
+        num_bins = 50
+        mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
+
+        while sum(mask) < 5: #make sure at least five sample point in the null hypothesis.
+            warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
+            num_bins -= 10
+            mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
+        
+        prior_Gdot0 = sum(mask)/self.M_random #prior number of points within the bin for Gdot = 0 
+        posterior_Gdot0 = np.sum(prodIsource[mask])
+    
+        print("prior_Gdot0: ", prior_Gdot0)
+        print("posterior_Gdot0: ", posterior_Gdot0)
+
+        if self.make_nice_plots:
+            plt.figure(figsize=(7,5))
+            plt.scatter(Gdot_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
+            plt.scatter(Gdot_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.axvline(self.Gdot_truth,color='k',linestyle='--',label='truth')
+            plt.xlabel("value of global-effect (Gdot)",fontsize=16)
+            plt.ylabel("posterior pdf p(Gdot|data)",fontsize=16)
+            plt.yscale('log')
+            plt.legend()
+            plt.savefig(f"{self.plots_folder}/posterior_vac_glob.png",dpi=300,bbox_inches='tight')
+            plt.close()
+        
+        return posterior_Gdot0/prior_Gdot0
