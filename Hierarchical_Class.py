@@ -6,6 +6,7 @@ import os
 import cupy as cp
 import pickle
 import corner
+import time
 
 from stableemrifisher.fisher import StableEMRIFisher
 from stableemrifisher.utils import inner_product, generate_PSD, padding
@@ -14,17 +15,20 @@ from few.utils.utility import get_p_at_t
 from few.trajectory.inspiral import EMRIInspiral
 from few.waveform import GenerateEMRIWaveform, Joint_RelativisticKerrCircularFlux
 from few.summation.aakwave import AAKSummation
-from fastlisaresponse import ResponseWrapper  # Response function 
 from few.utils.constants import YRSID_SI, C_SI
+
+from fastlisaresponse import ResponseWrapper  # Response function 
+from lisatools.detector import ESAOrbits #ESAOrbits correspond to esa-trailing-orbits.h5
 
 from scipy.integrate import quad, nquad
 from scipy.interpolate import RegularGridInterpolator, CubicSpline
 from scipy.stats import uniform
 from scipy.special import factorial
-from scipy.optimize import root
+from scipy.optimize import brentq, root
 
 use_gpu = True
 from scipy.stats import multivariate_normal
+import warnings
 
 #lots of supporting utility functions
 
@@ -126,7 +130,7 @@ def M_z_samples(N,M_range,z_range,lambda_v,grid_size,H0,Omega_m0,Omega_Lambda0,M
 
     return M_samples, z_samples
 
-def A_n_samples(N,Al_range,nl_range,lambda_l,grid_size,seed):
+def A_n_samples(N,lambda_l,seed):
     """ function to generate N samples of the local effect parameters A_l, n_l
     from A_l in Al_range, n_l in nl_range, given hyperparameters lambda_l and a grid of size grid_size
     """
@@ -138,29 +142,12 @@ def A_n_samples(N,Al_range,nl_range,lambda_l,grid_size,seed):
         Al_samples = np.zeros(N)
         nl_samples = np.zeros(N)
         
-        return Al_samples, nl_samples 
-    
-    Al_grid = uniform.rvs(loc=Al_range[0],scale=Al_range[1]-Al_range[0],size=grid_size)
-    
-    nl_grid = uniform.rvs(loc=nl_range[0],scale=nl_range[1]-nl_range[0],size=grid_size)
-    
-    prior_An = []
-    for i in range(grid_size):
-        prior_An.append(prior_loc([Al_grid[i],nl_grid[i]],f,mu_l,sigma_l))
-    
-    #normalizing the null and non-null parts separately
-    prior_An = np.array(prior_An)/np.sum(np.array(prior_An)) #normalizing
-    
-    #choosing f*N sources based on the probability distribution
-    indices = range(grid_size)
-    chosen = np.random.choice(indices,size=int(f*N),p=prior_An)
-    Al_samples = Al_grid[chosen]
-    nl_samples = nl_grid[chosen]
-    
-    #setting N - f*N sources to have A_l*, n_l* = 0.0
-    Al_samples = np.concatenate((Al_samples,np.zeros(N-len(Al_samples))))
-    nl_samples = np.concatenate((nl_samples,np.zeros(N-len(nl_samples))))
-
+    else:
+        cov = [[sigma_l[0]**2, 0],[0,sigma_l[1]**2]]
+        Al_samples, nl_samples = np.random.multivariate_normal(mean=mu_l,cov=cov,size=int(f*N)).T
+        Al_samples = np.concatenate((Al_samples,np.zeros(N-int(f*N))))
+        nl_samples = np.concatenate((nl_samples,np.zeros(N-int(f*N))))
+        
     return Al_samples, nl_samples
 
 def Ag_samples(N,lambda_g):
@@ -169,10 +156,10 @@ def Ag_samples(N,lambda_g):
     """
     return np.ones(N)*lambda_g #just a Dirac Delta
 
-def other_param_samples(N,M_samples,T_LISA,seed):
+def other_param_samples(N,M_samples,Tplunge_range,seed):
     np.random.seed(seed)
 
-    Trange = [0.5,T_LISA+1.0] #time-to-plunge (from initiation) of the EMRI population. This is an important (but unfortunately FREE) parameter to control the number of observed EMRIs.
+    Trange = Tplunge_range #time-to-plunge (from initiation) of the EMRI population. This is an important (but unfortunately FREE) parameter to control the number of observed EMRIs.
     
     Tstar = uniform.rvs(loc=Trange[0],scale=Trange[1]-Trange[0],size=N) #randomly choosing time of plunge for the Nth EMRI in the population
     
@@ -193,7 +180,7 @@ def other_param_samples(N,M_samples,T_LISA,seed):
     Phi0star = uniform.rvs(loc=phiSrange[0],scale=phiSrange[1]-phiSrange[0],size=N) #circ-ecc init EMRI phase
     
     return mustar, astar, qSstar, qKstar, phiSstar, phiKstar, Phi0star, Tstar
-
+    
 def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,filename):
     np.random.seed(seed)
     
@@ -264,47 +251,27 @@ def bias(psi_signal,phi_signal,multiplicative_factor):
 
     return psi_signal + delta_psi # Npsi 1D array + Npsi 1D array = Npsi 1D array
 
-def corner_plot_biases(detected_EMRIs, filename):
-    Fisher_index = []
-    varied_params = []
-    vacuum_params = []
-    local_params = []
-    global_params = []
+def bias(psi_signal,phi_signal,multiplicative_factor):
+    """ 
+    Given a true signal with decomposed param set (psi, phi) and the multiplicative factor,
+    calculate the biased param vector psi_bias.
+    (See Eq. 11 in https://arxiv.org/abs/2312.13028)
+    """
+    # d: number of measured source params
+    # Nphi: number of unmeasured params
+    # Npsi: number of measured params
+
+    phi_signal = np.atleast_1d(phi_signal)
     
-    for i in range(len(detected_EMRIs)):
-        varied_params.append(np.array(np.array(detected_EMRIs[i]['transformed_params'])))
-        vacuum_params.append(detected_EMRIs[i]['vacuum_params'])
-        local_params.append(detected_EMRIs[i]['local_params'])
-        global_params.append(detected_EMRIs[i]['global_params'])
-        Fisher_index.append(int(detected_EMRIs[i]['index']))
+    delta_phi = phi_signal - np.zeros(len(phi_signal)) #1D array - 1D array = 1D array of length Nphi
         
-    varied_params = np.array(varied_params)
-    vacuum_params = np.array(vacuum_params)
-    local_params = np.array(local_params)
-    global_params = np.array(global_params)
-    Fisher_index = np.array(Fisher_index)
-                
-    params = ['$\\log{M}$','$z$','$A_l$','$n_l$','$A_g$']
-    fig, axs = plt.subplots(len(params),len(params),figsize=(40,40))
+    #print(delta_phi)
     
-    for i in range(len(params)):
-        for j in range(len(params)):
-            if j < i:
-                axs[i,j].scatter(varied_params[:,j],varied_params[:,i],label='true',s=50)
-                axs[i,j].scatter(vacuum_params[:,j],vacuum_params[:,i],label='vac',s=50)
-                axs[i,j].scatter(local_params[:,j],local_params[:,i],label='loc',s=50)
-                axs[i,j].scatter(global_params[:,j],global_params[:,i],label='global',s=50)
-                
-                axs[i,j].set_xlabel(params[j],fontsize=16)
-                axs[i,j].set_ylabel(params[i],fontsize=16)
-                #axs[i,j].set_xscale('log')
-                #axs[i,j].set_yscale('log')
-            else:
-                axs[i,j].remove()
+    delta_psi = multiplicative_factor@delta_phi # Npsi x Nphi array times Nphi 1D array: 1D array of length Npsi
     
-    plt.legend(fontsize=15)
-    plt.savefig(f"{filename}/inferred_vs_truth.png",dpi=300,bbox_inches='tight')
-    plt.close()
+    #print(psi_ML)
+
+    return psi_signal + delta_psi # Npsi 1D array + Npsi 1D array = Npsi 1D array
 
 #source integral prior_vac derivatives
 ######## supporting functions ###########################################
@@ -438,7 +405,12 @@ def cofactor_matrix(matrix):
 def check_prior(param,bound):
     """ return True if param within bound (including edges), False otherwise """
 
-    return (param >= bound[0]) & (param <= bound[1])
+    if (param >= bound[0]) & (param <= bound[1]):
+        return 0 #within bounds
+    elif (param < bound[0]):
+        return -1 #lower bound hit
+    else:
+        return 1 #upper bound hit
 
 def Isource_vac(M, z, K, alpha, beta, Fisher, H0,Omega_m0,Omega_Lambda0,Mstar, indices = {'M':0,'z':1}):
     """ Source Integral approximation in the vacuum-GR hypothesis. 
@@ -603,6 +575,7 @@ class Hierarchical:
                        hyper_bounds={'K':[1e-3,1e-2],'alpha':[-0.5,0.5],'beta':[-0.5,0.5],
                                      'f':[0.0,1.0],'mu_Al':[1e-5,1e-5],'mu_nl':[8.0,8.0],'sigma_Al':[1e-6,1e-6],'sigma_nl':[0.8,0.8],
                                      'Gdot':[0.0,1e-8]},
+                       Tplunge_range = None,
                        T_LISA = 1.0, dt = 10.0, Mstar = 3e6,
                        M_random = int(1e4),
                        make_nice_plots=False,
@@ -626,8 +599,13 @@ class Hierarchical:
             true_hyper (dict): true values of all hyperparameters. Default are fiducial values consistent with a population of vacuum EMRIs.
             cosmo_params (dict): true values of 'Omega_m0' (matter density), 'Omega_Lambda0' (DE density), and 'H0' (Hubble constant in m/s/Gpc).
 
-            source_bounds (dict): prior range on source parameters in all three hypotheses. Must be provided for all parameters. We assume flat priors in this range.
-            hyper_bounds (dict): prior range on population (hyper)params in all three hypotheses. Must be provided for all hyperparams. We assume flat priors in this range.
+            source_bounds (dict): prior range on source parameters in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
+                                  Must be provided for all parameters. We assume flat priors in this range.
+            hyper_bounds (dict): prior range on population (hyper)params in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
+                                 Must be provided for all hyperparams. We assume flat priors in this range.
+
+            Tplunge_range (list): lower and upper bounds on the time-to-plunge on EMRIs in the population. This will be used to initialize p0's for all EMRIs.
+                                  Default is None corresponding to Tplunge_range = [0.5,T_LISA + 1.0].
             
             T_LISA (float): time (in years) of LISA observation window. Default is 1.0.
             dt (float): LISA sampling frequency. Default is 1.0.
@@ -703,6 +681,11 @@ class Hierarchical:
         self.sigma_nl_range = hyper_bounds['sigma_nl']
         self.Gdot_range = hyper_bounds['Gdot']
 
+        if Tplunge_range == None:
+            self.Tplunge_range = [0.5,T_LISA + 1.0]
+        else:
+            self.Tplunge_range = Tplunge_range
+
         self.T_LISA = T_LISA
         self.dt = dt
 
@@ -742,7 +725,7 @@ class Hierarchical:
             plt.close()
         
         #generating local effect parameters samples
-        self.Al_truth_samples, self.nl_truth_samples = A_n_samples(N=self.Npop,Al_range=self.Al_range,nl_range=self.nl_range,lambda_l=self.lambda_truth_loc,grid_size=grid_size,seed=self.seed)
+        self.Al_truth_samples, self.nl_truth_samples = A_n_samples(N=self.Npop,lambda_l=self.lambda_truth_loc,seed=self.seed)
         
         if self.make_nice_plots:
             plt.figure(figsize=(7,5))
@@ -774,7 +757,7 @@ class Hierarchical:
          self.phiS_truth_samples,
          self.phiK_truth_samples,
          self.Phi0_truth_samples,
-         self.T_truth_samples) = other_param_samples(N=self.Npop,M_samples=self.M_truth_samples,T_LISA=self.T_LISA,seed=self.seed)
+         self.T_truth_samples) = other_param_samples(N=self.Npop,M_samples=self.M_truth_samples,Tplunge_range=self.Tplunge_range,seed=self.seed)
         
         try:
             self.p0_truth_samples = np.load(f"{self.filename}/p0samps.npy")
@@ -803,11 +786,7 @@ class Hierarchical:
         #####################################################################
         #extracting the detected population using SNR threshold calculation
         #####################################################################
-        try:
-            self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy',allow_pickle=True)
-        except FileNotFoundError:
-            print("Calculating FIMs for the detectable EMRI population.")
-            self.calculate_detected()
+        self.calculate_detected()
 
         #print(self.detected_EMRIs)
 
@@ -826,8 +805,8 @@ class Hierarchical:
 
         for index, i in zip(Fisher_index,range(len(Fisher_index))):
             Fisher_i = np.load(f"{self.filename_Fishers}/Fisher_{index}.npy")
-            dist_i = getdistGpc(self.detected_EMRIs[i]['true_params'][6],self.H0,self.Omega_m0,self.Omega_Lambda0)
-            M_i = self.detected_EMRIs[i]['true_params'][0]
+            dist_i = self.detected_EMRIs[i]['true_params'][6] #true_params[6] = dist
+            M_i = self.detected_EMRIs[i]['true_params'][0] #true_params[0] = M
             
             J = Jacobian(M_i, dist_i,self.H0,self.Omega_m0,self.Omega_Lambda0)
             
@@ -846,7 +825,7 @@ class Hierarchical:
         self.inferred_params(hypothesis='global')
 
         if self.make_nice_plots:
-            corner_plot_biases(self.detected_EMRIs, self.plots_folder)
+            self.corner_plot_biases()
 
         #############################################
         #calculating the Savage-Dickey ratios in different hypotheses        
@@ -869,75 +848,82 @@ class Hierarchical:
     def calculate_detected(self):
         """ calculate the SNRs of the sources in the population. For sources with SNR > thresh,
         calculate and save the FIMs and parameter values. """
-        
-        self.detected_EMRIs = []
-        all_SNRs = []
+
+        try:
+            self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy',allow_pickle=True)
+            all_SNRs = np.loadtxt(f'{self.filename}/all_SNRs.txt')
+            
+        except FileNotFoundError:
+            print("Calculating FIMs for the detectable EMRI population.")
+            
+            self.detected_EMRIs = []
+            all_SNRs = []
+                    
+            for i in tqdm(range(self.Npop)):
+                M = self.M_truth_samples[i]
+                mu = self.mu_truth_samples[i]
+                a = self.a_truth_samples[i]
+                e0 = 0.0
+                Y0 = 1.0
+                dL = getdistGpc(self.z_truth_samples[i],self.H0,self.Omega_m0,self.Omega_Lambda0) #Gpc
                 
-        for i in tqdm(range(self.Npop)):
-            M = self.M_truth_samples[i]
-            mu = self.mu_truth_samples[i]
-            a = self.a_truth_samples[i]
-            e0 = 0.0
-            Y0 = 1.0
-            dL = getdistGpc(self.z_truth_samples[i],self.H0,self.Omega_m0,self.Omega_Lambda0) #Gpc
-            
-            qS = self.qS_truth_samples[i]
-            phiS = self.phiS_truth_samples[i]
-            qK = self.qK_truth_samples[i]
-            phiK = self.phiK_truth_samples[i]
-            Phi_phi0 = self.Phi0_truth_samples[i]
-            Phi_theta0 = 0.0
-            Phi_r0 = 0.0
-            T = self.T_LISA #all sources plunge at or after T_LISA, so the observation window is T_LISA at max.
-            dt = self.dt
-
-            Al = self.Al_truth_samples[i]
-            nl = self.nl_truth_samples[i]
-
-            Ag = self.Ag_truth_samples[i]
-            ng = 4.0
-
-            p0 = self.p0_truth_samples[i]
-
-            self.sef_kwargs['suffix'] = i
-
-            param_list = [M,mu,a,p0,e0,Y0,
-                          dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
-                          Al,nl,Ag,ng] #SEF param args
-            
-            param_save = [M,mu,a,p0,e0,Y0,
-                          self.z_truth_samples[i],qS,phiS,qK,phiK,
-                          Phi_phi0,Phi_theta0,Phi_r0,
-                          Al,nl,Ag,ng] #to be saved (work in z-only, NOT dL)
-
-            transformed_params = [np.log(M),self.z_truth_samples[i],Al,nl,Ag]
-            
-            emri_kwargs = {'T': T, 'dt': dt}
-
-            #print(param_list, self.T_truth_samples[i])
-            
-            sef = StableEMRIFisher(*param_list, **emri_kwargs, **self.sef_kwargs)
-            all_SNRs.append(sef.SNRcalc_SEF())
-
-            if all_SNRs[i] >= self.SNR_thresh:
-                self.detected_EMRIs.append({'index': i,'true_params': np.array(param_list),'SNR':all_SNRs[i], 
-                                            'lambda_v':self.lambda_truth_vac, 'lambda_l':self.lambda_truth_loc, 'lambda_g':self.lambda_truth_glob,
-                                           'transformed_params':np.array(transformed_params)})
-                try:
-                    _ = np.load(f"{self.filename_Fishers}/Fisher_{i}.npy")
-                except FileNotFoundError:
-                    sef() #calculate and save the FIM for the detected EMRI
-
-        all_SNRs = np.array(all_SNRs)
-        self.detected_EMRIs = np.array(self.detected_EMRIs)
-        np.save(f"{self.filename}/detected_EMRIs",self.detected_EMRIs)
-        np.savetxt(f"{self.filename}/all_SNRs.txt",np.array(all_SNRs))
-
+                qS = self.qS_truth_samples[i]
+                phiS = self.phiS_truth_samples[i]
+                qK = self.qK_truth_samples[i]
+                phiK = self.phiK_truth_samples[i]
+                Phi_phi0 = self.Phi0_truth_samples[i]
+                Phi_theta0 = 0.0
+                Phi_r0 = 0.0
+                T = self.T_LISA #all sources plunge at or after T_LISA, so the observation window is T_LISA at max.
+                dt = self.dt
+    
+                Al = self.Al_truth_samples[i]
+                nl = self.nl_truth_samples[i]
+    
+                Ag = self.Ag_truth_samples[i]
+                ng = 4.0
+    
+                p0 = self.p0_truth_samples[i]
+    
+                self.sef_kwargs['suffix'] = i
+    
+                param_list = [M,mu,a,p0,e0,Y0,
+                              dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
+                              Al,nl,Ag,ng] #SEF param args
+    
+                transformed_params = [np.log(M),self.z_truth_samples[i],Al,nl,Ag]
+                
+                emri_kwargs = {'T': T, 'dt': dt}
+    
+                #print(param_list, self.T_truth_samples[i])
+                
+                sef = StableEMRIFisher(*param_list, **emri_kwargs, **self.sef_kwargs)
+                all_SNRs.append(sef.SNRcalc_SEF())
+    
+                if all_SNRs[i] >= self.SNR_thresh:
+                    self.detected_EMRIs.append({'index': i,'true_params': np.array(param_list),'SNR':all_SNRs[i], 
+                                                'lambda_v':self.lambda_truth_vac, 'lambda_l':self.lambda_truth_loc, 'lambda_g':self.lambda_truth_glob,
+                                               'transformed_params':np.array(transformed_params)})
+                    try:
+                        _ = np.load(f"{self.filename_Fishers}/Fisher_{i}.npy")
+                    except FileNotFoundError:
+                        sef() #calculate and save the FIM for the detected EMRI
+    
+            all_SNRs = np.array(all_SNRs)
+            self.detected_EMRIs = np.array(self.detected_EMRIs)
+            np.save(f"{self.filename}/detected_EMRIs",self.detected_EMRIs)
+            np.savetxt(f"{self.filename}/all_SNRs.txt",np.array(all_SNRs))
+    
         print(f"#detected EMRIs: {len(self.detected_EMRIs)}")
 
         if self.make_nice_plots:
-            plt.hist(all_SNRs,bins=100,color='grey',label="All EMRIs")
-            plt.hist(all_SNRs[all_SNRs >= self.SNR_thresh],bins=100,color='red',label="Detected EMRIs")
+            counts, bins, patches = plt.hist(all_SNRs, bins=50)
+            for patch, bin_left in zip(patches, bins[:-1]):
+                if bin_left >= self.SNR_thresh:
+                    patch.set_facecolor('red')
+                else:
+                    patch.set_facecolor('grey')
+
             plt.axvline(self.SNR_thresh,color='k',linestyle='--',label='SNR threshold')
             plt.legend()
             plt.xlabel("SNRs",fontsize=16)
@@ -961,8 +947,8 @@ class Hierarchical:
     
             if hypothesis == 'vacuum':
                 #vacuum hypothesis
-                indices_psi = [0,1]  #indices of measured params
-                indices_phi = [2,3,4] #indices of unmeasured params
+                indices_psi = [0,1]  #indices of measured params (lnM, z)
+                indices_phi = [2,3,4] #indices of unmeasured params (Al, nl, Ag)
                 
                 i_psipsi = np.ix_(indices_psi,indices_psi)
                 i_psiphi = np.ix_(indices_psi,indices_phi)
@@ -983,8 +969,8 @@ class Hierarchical:
     
             if hypothesis == 'local':
                 #local hypothesis
-                indices_psi = [0,1,2,3]  #indices of measured params
-                indices_phi = [4] #indices of unmeasured params
+                indices_psi = [0,1,2,3]  #indices of measured params (lnM,z,Al,nl)
+                indices_phi = [4] #indices of unmeasured params (Ag)
                 
                 i_psipsi = np.ix_(indices_psi,indices_psi)
                 i_psiphi = np.ix_(indices_psi,indices_phi)
@@ -1013,8 +999,8 @@ class Hierarchical:
     
             if hypothesis == 'global':
                 #global hypothesis
-                indices_psi = [0,1,4]  #indices of measured params
-                indices_phi = [2,3] #indices of unmeasured params
+                indices_psi = [0,1,4]  #indices of measured params (lnM,z,Ag)
+                indices_phi = [2,3] #indices of unmeasured params (Al,nl)
                 
                 i_psipsi = np.ix_(indices_psi,indices_psi)
                 i_psiphi = np.ix_(indices_psi,indices_phi)
@@ -1049,182 +1035,200 @@ class Hierarchical:
         Ivac_all = []
 
         Nobs = self.Nobs
-
+        count = 0.0 #number of out of bound EMRIs
+        
         bounds_vac = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z']}
-    
+
         for i in range(len(self.detected_EMRIs)):
+            out_of_bounds = False
             index = int(self.detected_EMRIs[i]["index"])
             Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
             vacparams = self.detected_EMRIs[i]["vacuum_params"] # logMvac, zvac, Alvac, nlvac, Agvac
-    
-            out_of_bound = False
-    
-            for param,i in zip(bounds_vac.keys(),range(len(bounds_vac.keys()))):
-                if not check_prior(vacparams[i],bounds_vac[param]): #if the source is outside the prior bound after incurring inference biasese
-                    print(f"source {index} is out of prior bounds on {param}. \n\
-                            Parameter value: {vacparams[i]}. Bound: {bounds_vac[param]}. \n\
-                            Removing from list of detections.")
-                    out_of_bound = True
-                    break
-    
-            if out_of_bound:
-                Ivac_all.append(1.0)
-                Nobs -= 1
-    
-            else:    
-                Ivac_all.append(Isource_vac(M=np.exp(vacparams[0]),z=vacparams[1], 
-                                K=K, alpha=alpha, beta=beta, #variable hyperparameters
-                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth))
+        
+            for param,j in zip(bounds_vac.keys(),range(len(bounds_vac.keys()))):
+                if check_prior(vacparams[j],bounds_vac[param]) == 1: #if the source parameters hits the upper limit
+                    out_of_bounds = True
+                    warnings.warn(f"source {index} is out of prior bounds on {param} (upper bound hit). \n\
+                            Parameter value: {vacparams[j]}. Bound: {bounds_vac[param]}.")
+                    varparams[j] = bounds_vac[param][1] #varparam takes the upper limit value
+                elif check_prior(vacparams[j],bounds_vac[param]) == -1: #if the source parameter hits the lower limit
+                    out_of_bounds = True
+                    warnings.warn(f"source {index} is out of prior bounds on {param} (lower bound hit). \n\
+                            Parameter value: {vacparams[j]}. Bound: {bounds_vac[param]}.")
+                    vacparams[j] = bounds_vac[param][0] #vacparam takes the lower limit value
+
+            if out_of_bounds:
+                count+=1
+                
+            Ivac_all.append(Isource_vac(M=np.exp(vacparams[0]),z=vacparams[1], 
+                            K=K, alpha=alpha, beta=beta, #variable hyperparameters
+                            Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth))
+
+        warnings.warn(f"EMRIs out-of-bounds: {int(count)}")
     
         return factorial(Nobs-1)*np.prod(np.array(Ivac_all))
 
-    def source_integral_loc(self,K,alpha,beta,f,mu_Al,mu_nl,sigma_Al,sigma_nl):
+    def source_integral_loc(self,K,alpha,beta,f,mu_Al,mu_nl,sigma_Al,sigma_nl,Fishers_all):
         
         """Calculate the source integral in the local hypothesis.
         bounds_loc is a dict of bounds on M, z, Al, nl. Bounds can be given for any subset of the parameters."""
-            
+        
         Nobs = self.Nobs
+        count = 0.0 #number of out of bound EMRIs
         
         #calculate source integral
         Iloc_all = []
 
         bounds_loc = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
-                      'Al':self.source_bounds['Al'],'nl':self.source_bounds['nl']}
+                      'Al':self.source_bounds['Al'],'nl':self.source_bounds['nl']} #prior range
     
         for i in range(len(self.detected_EMRIs)):
+            out_of_bounds = False
             index = int(self.detected_EMRIs[i]["index"])
-            Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            Fisher = Fishers_all[i] #np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
             locparams = self.detected_EMRIs[i]["local_params"] # logMloc, zloc, Alloc, nlloc, Agloc
+        
+            for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
+                if check_prior(locparams[j],bounds_loc[param]) == 1: #if the source parameters hits the upper limit
+                    out_of_bounds = True
+                    warnings.warn(f"source {index} is out of prior bounds on {param} (upper bound hit). \n\
+                            Parameter value: {locparams[j]}. Bound: {bounds_loc[param]}.")
+                    locparams[j] = bounds_loc[param][1] #locparam takes the upper limit value
+                elif check_prior(locparams[j],bounds_loc[param]) == -1: #if the source parameter hits the lower limit
+                    out_of_bounds = True
+                    warnings.warn(f"source {index} is out of prior bounds on {param} (lower bound hit). \n\
+                            Parameter value: {locparams[j]}. Bound: {bounds_loc[param]}.")
+                    locparams[j] = bounds_loc[param][0] #locparam takes the lower limit value
+
+            if out_of_bounds:
+                count+=1
     
-            out_of_bound = False
-    
-            for param,i in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
-                if not check_prior(locparams[i],bounds_loc[param]): #if the source is outside the prior bound
-                    print(f"source {index} is out of prior bounds on {param}. \n\
-                            Parameter value: {locparams[i]}. Bound: {bounds_loc[param]}. \n\
-                            Removing from list of detections.")
-                    out_of_bound = True
-                    break
-    
-            if out_of_bound:
-                Iloc_all.append(1.0)
-                Nobs -= 1
-    
-            else:    
-                Iloc_i = Isource_loc(M=np.exp(locparams[0]),z=locparams[1], vec_l=[locparams[2],locparams[3]], 
+            Iloc_i = Isource_loc(M=np.exp(locparams[0]),z=locparams[1], vec_l=[locparams[2],locparams[3]], 
                                 K=K, alpha=alpha, beta=beta, 
                                 f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
                                 Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
                                 Mstar=self.Mstar_truth)
-
-                if np.isnan(Iloc_i):
-                    Iloc_all.append(1.0)
-                    Nobs -= 1
-                else:
-                    Iloc_all.append(Iloc_i)
+    
+            if np.isnan(Iloc_i):
+                Iloc_all.append(1.0)
+                Nobs -= 1
+            else:
+                Iloc_all.append(Iloc_i)
 
         lnposterior = np.sum(np.log(np.array(Iloc_all))) #avoid overflow by calculating log posterior
+        if count > 0.0:
+            warnings.warn(f"EMRIs out-of-bounds: {int(count)}")
         
-        return Nobs, lnposterior
+        return lnposterior
 
-    def source_integral_glob(self,K,alpha,beta,Gdot):
+    def source_integral_glob(self,K,alpha,beta,Gdot,Fishers_all):
         
         """Calculate the source integral in the global hypothesis.
         bounds_loc is a dict of bounds on M, z, Al, nl. Bounds can be given for any subset of the parameters."""
             
         Nobs = self.Nobs
+        count = 0.0 #number of out of bound EMRIs
         
         #calculate source integral
         Iglob_all = []
 
         bounds_glob = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
-                      'Ag':self.source_bounds['Ag']}
+                      'Ag':self.source_bounds['Ag']} #prior range
     
         for i in range(len(self.detected_EMRIs)):
+            out_of_bounds = False
             index = int(self.detected_EMRIs[i]["index"])
-            Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            Fisher = Fishers_all[i] #np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
             globparams = self.detected_EMRIs[i]["global_params"] # logMglob, zglob, Alglob, nlglob, Agglob
             
-            out_of_bound = False
+            for param,j in zip(bounds_glob.keys(),range(len(bounds_glob.keys()))):
+                if check_prior(globparams[j],bounds_glob[param]) == 1: #if the source parameters hits the upper limit
+                    out_of_bounds = True
+                    warnings.warn(f"source {index} is out of prior bounds on {param} (upper bound hit). \n\
+                            Parameter value: {globparams[j]}. Bound: {bounds_glob[param]}.")
+                    globparams[j] = bounds_glob[param][1] #varparam takes the upper limit value
+                elif check_prior(globparams[j],bounds_glob[param]) == -1: #if the source parameter hits the lower limit
+                    out_of_bounds = True
+                    warnings.warn(f"source {index} is out of prior bounds on {param} (lower bound hit). \n\
+                            Parameter value: {globparams[j]}. Bound: {bounds_glob[param]}.")
+                    globparams[j] = bounds_glob[param][0] #vacparam takes the lower limit value
+
+            if out_of_bounds:
+                count+=1
     
-            for param,i in zip(bounds_glob.keys(),[0,1,4]):
-                if not check_prior(globparams[i],bounds_glob[param]): #if the source is outside the prior bound
-                    print(f"source {index} is out of prior bounds on {param}. \n\
-                            Parameter value: {globparams[i]}. Bound: {bounds_glob[param]}. \n\
-                            Removing from list of detections.")
-                    out_of_bound = True
-                    break
-    
-            if out_of_bound:
+            Iglob_i = Isource_glob(M=np.exp(globparams[0]),z=globparams[1],Ag=globparams[-1],
+                                  K=K, alpha=alpha, beta=beta, 
+                                  Gdot=Gdot,Mstar=self.Mstar_truth,
+                                  Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+            
+            if np.isnan(Iglob_i):
                 Iglob_all.append(1.0)
                 Nobs -= 1
-    
-            else:    
-                Iglob_i = Isource_glob(M=np.exp(globparams[0]),z=globparams[1],Ag=globparams[-1],
-                                      K=K, alpha=alpha, beta=beta, 
-                                      Gdot=Gdot,Mstar=self.Mstar_truth,
-                                      Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
-                if np.isnan(Iglob_i):
-                    Iglob_all.append(1.0)
-                    Nobs -= 1
-                else:
-                    Iglob_all.append(Iglob_i)
+            else:
+                Iglob_all.append(Iglob_i)
 
         lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
+        if count > 0.0:
+            warnings.warn(f"EMRIs out-of-bounds: {int(count)}")
 
-        return Nobs, lnposterior
+        return lnposterior
 
     def savage_dickey_vacloc(self):
         #no seed ideally required for this calculation
-        seed = self.seed
+        t = 1e6 * time.time() # current time in microseconds
+        np.random.seed(int(t) % 2**32)
+
+        samples = np.random.uniform(
+                                    low=[self.K_range[0], self.alpha_range[0], self.beta_range[0], self.f_range[0], 
+                                         self.mu_Al_range[0], self.mu_nl_range[0], self.sigma_Al_range[0], self.sigma_nl_range[0]],
+                                    high=[self.K_range[1], self.alpha_range[1], self.beta_range[1], self.f_range[1], 
+                                          self.mu_Al_range[1], self.mu_nl_range[1], self.sigma_Al_range[1], self.sigma_nl_range[1]],
+                                    size=(self.M_random, 8)
+                                    )
         
-        K_samples = uniform.rvs(loc=self.K_range[0],scale=self.K_range[1]-self.K_range[0],size=self.M_random)
-        
-        alpha_samples = uniform.rvs(loc=self.alpha_range[0],scale=self.alpha_range[1]-self.alpha_range[0],size=self.M_random)
-        
-        beta_samples = uniform.rvs(loc=self.beta_range[0],scale=self.beta_range[1]-self.beta_range[0],size=self.M_random)
-    
-        f_samples = uniform.rvs(loc=self.f_range[0],scale=self.f_range[1]-self.f_range[0],size=self.M_random)
-    
-        mu_Al_samples = uniform.rvs(loc=self.mu_Al_range[0],scale=self.mu_Al_range[1]-self.mu_Al_range[0],size=self.M_random)
-        mu_nl_samples = uniform.rvs(loc=self.mu_nl_range[0],scale=self.mu_nl_range[1]-self.mu_nl_range[0],size=self.M_random)
-    
-        sigma_Al_samples = uniform.rvs(loc=self.sigma_Al_range[0],scale=self.sigma_Al_range[1]-self.sigma_Al_range[0],size=self.M_random)
-        sigma_nl_samples = uniform.rvs(loc=self.sigma_nl_range[0],scale=self.sigma_nl_range[1]-self.sigma_nl_range[0],size=self.M_random)
+        K_samples, alpha_samples, beta_samples, f_samples, mu_Al_samples, mu_nl_samples, sigma_Al_samples, sigma_nl_samples = samples.T
+
+        #make sure f_samples have at least 10% draws at the null value for SD calculation
+        f_samples = f_samples[:int(0.9*self.M_random)]
+        f_samples = np.concatenate((f_samples,np.zeros(self.M_random-len(f_samples))))
+
+        Fishers_all = []
+        for i in range(len(self.detected_EMRIs)):
+            index = int(self.detected_EMRIs[i]["index"])
+            Fishers_all.append(np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy"))
+
+        Fishers_all = np.array(Fishers_all)
 
         lnprodIsource = []
         removed_indices = []
+    
         for j in tqdm(range(self.M_random)):
-                
-            Nobs, lnprodIsource_j = self.source_integral_loc(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
-                                             f=f_samples[j], mu_Al=mu_Al_samples[j], mu_nl=mu_nl_samples[j],
-                                             sigma_Al=sigma_Al_samples[j], sigma_nl=sigma_nl_samples[j])
-            lnprodIsource.append(np.log(factorial(Nobs-1))+lnprodIsource_j)
-            #else:
-            #    removed_indices.append(j) #overflow indices
-                
-        #K_samples = np.delete(K_samples,removed_indices)
-        #alpha_samples = np.delete(alpha_samples,removed_indices)
-        #beta_samples = np.delete(beta_samples,removed_indices)
-        #f_samples = np.delete(f_samples,removed_indices)
-        #mu_Al_samples = np.delete(mu_Al_samples,removed_indices)
-        #mu_nl_samples = np.delete(mu_nl_samples,removed_indices)
-        #sigma_Al_samples = np.delete(sigma_Al_samples,removed_indices)
-        #sigma_nl_samples = np.delete(sigma_nl_samples,removed_indices)
+            lnprodIsource_j = self.source_integral_loc(K=K_samples[j],alpha=alpha_samples[j],beta=beta_samples[j],
+                                                        f=f_samples[j],mu_Al=mu_Al_samples[j],mu_nl=mu_nl_samples[j],
+                                                        sigma_Al=sigma_Al_samples[j],sigma_nl=sigma_nl_samples[j],
+                                                        Fishers_all=Fishers_all)
+            
+            lnprodIsource.append(lnprodIsource_j)
     
         lnprodIsource = np.array(lnprodIsource) - np.max(lnprodIsource)
         prodIsource = np.exp(lnprodIsource)
+
+        for i in range(len(prodIsource)):
+            if prodIsource[i] < 1e-300: #control underflow
+                prodIsource[i] = 1e-300
+        
         prodIsource = prodIsource/np.sum(prodIsource)
+        
         #f=0 mask
-        num_bins = 50
+        num_bins = 40
         mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
         
-        while sum(mask) < 5: #make sure at least five sample point in the null hypothesis.
+        while sum(mask) < 10: #make sure at least ten sample point in the null hypothesis.
             warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
-            num_bins -= 10
+            num_bins -= 5
             mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
             
         prior_f0 = sum(mask)/len(prodIsource) #prior number of points within the bin for f = 0 
@@ -1242,52 +1246,106 @@ class Hierarchical:
             plt.ylabel("posterior pdf p(f|data)",fontsize=16)
             plt.yscale('log')
             plt.legend()
-            plt.savefig(f"{self.plots_folder}/posterior_vac_loc.png",dpi=300,bbox_inches='tight')
+            plt.savefig(f"{self.plots_folder}/posterior_vac_loc_f.png",dpi=300,bbox_inches='tight')
+            plt.close()
+
+            plt.figure(figsize=(7,5))
+            plt.scatter(mu_Al_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
+            plt.scatter(mu_Al_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.axvline(self.mu_Al_truth,color='k',linestyle='--',label='truth')
+            plt.xlabel(r"mean disk-effect amplitude of local-effect EMRIs ($\mu_{Al}$)", fontsize=16)
+            plt.ylabel(r"posterior pdf p($\mu_{Al}$|data)",fontsize=16)
+            plt.yscale('log')
+            plt.legend()
+            plt.savefig(f"{self.plots_folder}/posterior_vac_loc_muAl.png",dpi=300,bbox_inches='tight')
+            plt.close()
+
+            plt.figure(figsize=(7,5))
+            plt.scatter(mu_nl_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
+            plt.scatter(mu_nl_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.axvline(self.mu_nl_truth,color='k',linestyle='--',label='truth')
+            plt.xlabel(r"mean disk-effect slope of local-effect EMRIs ($\mu_{nl}$)", fontsize=16)
+            plt.ylabel(r"posterior pdf p($\mu_{nl}$|data)",fontsize=16)
+            plt.yscale('log')
+            plt.legend()
+            plt.savefig(f"{self.plots_folder}/posterior_vac_loc_munl.png",dpi=300,bbox_inches='tight')
+            plt.close()
+
+            plt.figure(figsize=(7,5))
+            plt.scatter(sigma_Al_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
+            plt.scatter(sigma_Al_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.axvline(self.sigma_Al_truth,color='k',linestyle='--',label='truth')
+            plt.xlabel(r"std of disk-effect amplitude of local-effect EMRIs ($\sigma_{Al}$)", fontsize=16)
+            plt.ylabel(r"posterior pdf p($\sigma_{Al}$|data)",fontsize=16)
+            plt.yscale('log')
+            plt.legend()
+            plt.savefig(f"{self.plots_folder}/posterior_vac_loc_sigmaAl.png",dpi=300,bbox_inches='tight')
+            plt.close()
+
+            plt.figure(figsize=(7,5))
+            plt.scatter(sigma_nl_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
+            plt.scatter(sigma_nl_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.axvline(self.sigma_nl_truth,color='k',linestyle='--',label='truth')
+            plt.xlabel(r"std of disk-effect slope of local-effect EMRIs ($\sigma_{nl}$)", fontsize=16)
+            plt.ylabel(r"posterior pdf p($\sigma_{nl}$|data)",fontsize=16)
+            plt.yscale('log')
+            plt.legend()
+            plt.savefig(f"{self.plots_folder}/posterior_vac_loc_sigmanl.png",dpi=300,bbox_inches='tight')
             plt.close()
         
         return posterior_f0/prior_f0
     
     def savage_dickey_vacglob(self):
-        np.random.seed(self.seed)
+        #no seed ideally required for this calculation
+        t = 1e6 * time.time() # current time in microseconds
+        np.random.seed(int(t) % 2**32)
 
-        K_samples = uniform.rvs(loc=self.K_range[0],scale=self.K_range[1]-self.K_range[0],size=self.M_random)
+        samples = np.random.uniform(
+                                    low=[self.K_range[0], self.alpha_range[0], self.beta_range[0], self.Gdot_range[0]],
+                                    high=[self.K_range[1], self.alpha_range[1], self.beta_range[1], self.Gdot_range[1]],
+                                    size=(self.M_random, 4)
+                                    )
         
-        alpha_samples = uniform.rvs(loc=self.alpha_range[0],scale=self.alpha_range[1]-self.alpha_range[0],size=self.M_random)
+        K_samples, alpha_samples, beta_samples, Gdot_samples = samples.T
+
+        #make sure Gdot_samples have at least 10% draws at the null value for SD calculation
+        Gdot_samples = Gdot_samples[:int(0.9*self.M_random)]
+        Gdot_samples = np.concatenate((Gdot_samples,np.zeros(self.M_random-len(Gdot_samples))))
         
-        beta_samples = uniform.rvs(loc=self.beta_range[0],scale=self.beta_range[1]-self.beta_range[0],size=self.M_random)
-        
-        Gdot_samples = uniform.rvs(loc=self.Gdot_range[0],scale=self.Gdot_range[1]-self.Gdot_range[0],size=self.M_random)
+        Fishers_all = []
+        for i in range(len(self.detected_EMRIs)):
+            index = int(self.detected_EMRIs[i]["index"])
+            Fishers_all.append(np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy"))
+
+        Fishers_all = np.array(Fishers_all)
     
         lnprodIsource = []
         #removed_indices = []
         for j in tqdm(range(self.M_random)):
                 
-            Nobs, lnprodIsource_j = self.source_integral_glob(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
-                                                  Gdot=Gdot_samples[j])
+            lnprodIsource_j = self.source_integral_glob(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
+                                                  Gdot=Gdot_samples[j],Fishers_all=Fishers_all)
 
             #print(K_samples[j], alpha_samples[j], beta_samples[j], Gdot_samples[j], prodIsource_j)
     
-            lnprodIsource.append(np.log(factorial(Nobs-1))+lnprodIsource_j)
-            
-            #else:
-            #    removed_indices.append(j) #overflow indices
-
-        #K_samples = np.delete(K_samples,removed_indices)
-        #alpha_samples = np.delete(alpha_samples,removed_indices)
-        #beta_samples = np.delete(beta_samples,removed_indices)
-
-        #Gdot_samples = np.delete(Gdot_samples,removed_indices)
+            lnprodIsource.append(lnprodIsource_j)
     
         lnprodIsource = np.array(lnprodIsource) - np.max(lnprodIsource)
         prodIsource = np.exp(lnprodIsource)
+
+        for i in range(len(prodIsource)):
+            if prodIsource[i] < 1e-300: #control underflow
+                prodIsource[i] = 1e-300
+                
         prodIsource = prodIsource/np.sum(prodIsource)
+            
         #Gdot=0 mask
-        num_bins = 50
+        num_bins = 40
         mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
 
-        while sum(mask) < 5: #make sure at least five sample point in the null hypothesis.
+        while sum(mask) < 10: #make sure at least ten sample point in the null hypothesis.
             warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
-            num_bins -= 10
+            num_bins -= 5
             mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
         
         prior_Gdot0 = sum(mask)/self.M_random #prior number of points within the bin for Gdot = 0 
@@ -1309,3 +1367,63 @@ class Hierarchical:
             plt.close()
         
         return posterior_Gdot0/prior_Gdot0
+
+    def corner_plot_biases(self):
+        Fisher_index = []
+        varied_params = []
+        vacuum_params = []
+        local_params = []
+        global_params = []
+        SNRs = []
+        
+        for i in range(len(self.detected_EMRIs)):
+            varied_params.append(np.array(np.array(self.detected_EMRIs[i]['transformed_params'])))
+            vacuum_params.append(self.detected_EMRIs[i]['vacuum_params'])
+            local_params.append(self.detected_EMRIs[i]['local_params'])
+            global_params.append(self.detected_EMRIs[i]['global_params'])
+            Fisher_index.append(int(self.detected_EMRIs[i]['index']))
+            SNRs.append(self.detected_EMRIs[i]['SNR'])
+            
+        varied_params = np.array(varied_params)
+        vacuum_params = np.array(vacuum_params)
+        local_params = np.array(local_params)
+        global_params = np.array(global_params)
+        Fisher_index = np.array(Fisher_index)
+        SNRs = np.array(SNRs)
+        
+        params = ['$\\log{M}$','$z$','$A_l$','$n_l$','$A_g$']
+        param_lims = [np.log(self.M_range),self.z_range,self.Al_range,self.nl_range,self.Ag_range]
+        fig, axs = plt.subplots(len(params),len(params),figsize=(40,40))
+
+        plt.subplots_adjust(hspace=0, wspace=0)
+        
+        for i in range(len(params)):
+            for j in range(len(params)):
+                if j < i:
+                    axs[i,j].scatter(varied_params[:,j],varied_params[:,i],s=SNRs,label='true',alpha=0.5)
+                    axs[i,j].scatter(vacuum_params[:,j],vacuum_params[:,i],s=SNRs,label='vac',alpha=0.5)
+                    axs[i,j].scatter(local_params[:,j],local_params[:,i],s=SNRs,label='loc',alpha=0.5)
+                    axs[i,j].scatter(global_params[:,j],global_params[:,i],s=SNRs,label='global',alpha=0.5)
+
+                    axs[i, j].grid(linestyle='--')
+                    
+                    if i == len(params)-1:
+                        axs[i,j].set_xlabel(params[j],fontsize=46)
+                    else:
+                        axs[i, j].set_xticklabels([])
+                    if j == 0:
+                        axs[i,j].set_ylabel(params[i],fontsize=46)
+                    else:
+                        axs[i, j].set_yticklabels([])
+                    
+                    axs[i,j].set_xlim(param_lims[j])
+                    axs[i,j].set_ylim(param_lims[i])
+                    
+                else:
+                    axs[i,j].remove()
+        
+        handles, labels = axs[1, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, fontsize=60, loc='upper right', bbox_to_anchor=(0.7, 0.7))  # Place legend outside
+
+        plt.savefig(f"{self.plots_folder}/inferred_vs_truth.png",dpi=300,bbox_inches='tight')
+        plt.close()
