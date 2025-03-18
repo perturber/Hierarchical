@@ -102,14 +102,14 @@ SNR_thresh = 20.0
 
 #true values of population hyperparameters.
 true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
-            'f':0.5,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-            'Gdot':1e-9 #global effect hyper
+            'f':0.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
+            'Gdot':0.0 #global effect hyper
            }
 
 #prior bounds on source parameters
 source_bounds={'M':[1e5,1e7],'z':[0.01,1.0], #vacuum parameters
-               'Al':[0.0,1e-4],'nl':[-20.0,20.0], #local effect parameters
-               'Ag':[-1e-8,1e-8] #global effect parameters
+               'Al':[0.0,1e-4],'nl':[0.0,20.0], #local effect parameters
+               'Ag':[0.0,1e-8] #global effect parameters
               }
 
 #prior bounds on population hyperparameters
@@ -120,6 +120,13 @@ hyper_bounds={'K':[1e-3,1e-2],'alpha':[-0.5,0.5],'beta':[-0.5,0.5], #vacuum hype
              'Gdot':source_bounds['Ag'] #global effect hyper
              }
              
+             
+filename_Fishers_loc = 'Fishers_loc' #subfolder with inferred FIMs in local hypothesis
+filename_Fishers_glob = 'Fishers_glob' #subfolder with inferred FIMs in global hypothesis
+
+Fisher_validation_kwargs = {'filename_Fishers_loc':filename_Fishers_loc,
+                            'filename_Fishers_glob':filename_Fishers_glob,
+                            'validate':False,'KL_threshold':1.0}
 
 filename = f'Hierarchical_Npop_{Npop}_f_{true_hyper['f']}_Gdot_{true_hyper['Gdot']}_K_{true_hyper['K']}_alpha_{true_hyper['alpha']}_beta_{true_hyper['beta']}' #folder with all the analysis data and plots
 filename_Fishers = 'Fishers' #subfolder with all the Fisher matrices
@@ -140,6 +147,6 @@ hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef_kwargs=sef_kwargs,
                     filename=filename,filename_Fishers=filename_Fishers,
                     cosmo_params=cosmo_params,true_hyper=true_hyper,
                     source_bounds=source_bounds,hyper_bounds=hyper_bounds,Mstar=Mstar,
-                    T_LISA=T_LISA,make_nice_plots=True,M_random=int(5e3))
+                    T_LISA=T_LISA,make_nice_plots=True,M_random=int(2e3),Fisher_validation_kwargs=Fisher_validation_kwargs)
 
 hier()

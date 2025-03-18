@@ -30,38 +30,10 @@ use_gpu = True
 from scipy.stats import multivariate_normal
 import warnings
 
+from FisherValidation import FisherValidation
+from utility import H, integrand_dc, dc, getdistGpc, dlminusdistz, getz, Jacobian, check_prior
+
 #lots of supporting utility functions
-
-#cosmology functions
-def H(z,H0,Omega_m0,Omega_Lambda0):
-    """
-    calculate the Hubble parameter at redshift z in m/s/Gpc
-    """
-    return H0 * np.sqrt(Omega_m0*(1+z)**3 + Omega_Lambda0)
-
-def integrand_dc(z,H0,Omega_m0,Omega_Lambda0):
-    return C_SI/H(z,H0,Omega_m0,Omega_Lambda0)
-
-def dc(z,H0,Omega_m0,Omega_Lambda0):
-    """
-    returns the comoving distance in Gpc for a given redshift z
-    """
-    return quad(integrand_dc,0,z,args=(H0,Omega_m0,Omega_Lambda0),epsabs=1e-1,epsrel=1e-1)[0]/1000
-
-def getdistGpc(z,H0,Omega_m0,Omega_Lambda0):
-    """
-    returns the luminosity distance in Gpc for a given redshift z
-    """
-    return (1+z)*dc(z,H0,Omega_m0,Omega_Lambda0)
-
-def dlminusdistz(z, dl, H0,Omega_m0,Omega_Lambda0):
-    return dl - getdistGpc(z,H0,Omega_m0,Omega_Lambda0)
-
-def getz(dl,H0,Omega_m0,Omega_Lambda0):
-    """
-    returns the redshift for a given luminosity distance in Gpc
-    """    
-    return (root(dlminusdistz,x0=0.1,args=(dl,H0,Omega_m0,Omega_Lambda0)).x)[0]
     
 #source parameter prior pdfs in all three hypotheses
 #supporting functions for prior_vac
@@ -211,22 +183,6 @@ def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,
     np.save(f"{filename}/p0samps",p0samps)
     
     return np.array(p0samps)
-    
-
-#Fisher Matrix supporting function
-def Jacobian(M,dist,H0,Omega_m0,Omega_Lambda0):
-    """ 
-    Jacobian for Fisher parameter transformation from [M,dist,Al,nl,Ag] to [lnM,z,Al,nl,Ag]
-    Returns a 5x5 diagonal np.ndarray.
-    """
-    
-    #Jacobian = partial old/partial new
-    
-    delta = dist*1e-5
-    del_z_del_dist = ((getz(dist+delta,H0,Omega_m0,Omega_Lambda0)-getz(dist-delta,H0,Omega_m0,Omega_Lambda0))/(2*delta))
-    diag = np.diag((M,(del_z_del_dist)**-1,1.0,1.0,1.0))
-    
-    return diag
     
 #bias calculation functions
 def bias(psi_signal,phi_signal,multiplicative_factor):
@@ -401,16 +357,6 @@ def cofactor_matrix(matrix):
     return cofactor
     
 #individual source integral terms in all three hypotheses
-#supporting function
-def check_prior(param,bound):
-    """ return True if param within bound (including edges), False otherwise """
-
-    if (param >= bound[0]) & (param <= bound[1]):
-        return 0 #within bounds
-    elif (param < bound[0]):
-        return -1 #lower bound hit
-    else:
-        return 1 #upper bound hit
 
 def Isource_vac(M, z, K, alpha, beta, Fisher, H0,Omega_m0,Omega_Lambda0,Mstar, indices = {'M':0,'z':1}):
     """ Source Integral approximation in the vacuum-GR hypothesis. 
@@ -565,6 +511,50 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
 
 class Hierarchical:
 
+    """
+        This class generates a population of extreme-mass-ratio inspirals (EMRIs) 
+        for a fiducial set of hyperparameters on local and global perturbative effects on top of vacuum evolution 
+        and calculates the approximate Bayes factor (Savage-Dickey ratio) comparing 
+        three hypothesis: vacuum, vac+local effect only, vac+global effect only.
+
+    Args:
+        Npop (int): Number of EMRIs in the true population.
+        SNR_thresh (float): Signal-to-noise ratio threshold to claim 'detected' EMRI set.
+        sef_kwargs (dict): keyword arguments to provide to the StableEMRIFishers class. Must include:
+                           'EMRI_waveform_gen', 'param_names'. All others optional.
+
+        filename (string): folder name where the data is being stored. No default because impractical to not save results.
+        filename_Fisher (string): a sub-folder for storing Fisher files (book-keeping). If None, Fishers directly stored in filename. Default is None. 
+
+        true_hyper (dict): true values of all hyperparameters. Default are fiducial values consistent with a population of vacuum EMRIs.
+        cosmo_params (dict): true values of 'Omega_m0' (matter density), 'Omega_Lambda0' (DE density), and 'H0' (Hubble constant in m/s/Gpc).
+
+        source_bounds (dict): prior range on source parameters in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
+                              Must be provided for all parameters. We assume flat priors in this range.
+        hyper_bounds (dict): prior range on population (hyper)params in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
+                             Must be provided for all hyperparams. We assume flat priors in this range.
+
+        Tplunge_range (Union(list,NoneType)): lower and upper bounds on the time-to-plunge on EMRIs in the population. This will be used to initialize p0's for all EMRIs.
+                              Default is None corresponding to Tplunge_range = [0.5,T_LISA + 1.0].
+        
+        T_LISA (float): time (in years) of LISA observation window. Default is 1.0.
+        dt (float): LISA sampling frequency. Default is 1.0.
+        Mstar (float) Constant in prior_vac. Default is 3e6. We choose it here following https://arxiv.org/pdf/1703.09722. Future implementations can vary this also.
+
+        M_random (int): Number of random samples for Savage-Dickey ratio calculation. Default is int(1e4).
+        Fisher_validation_kwargs (dict): Keyword arguments for FisherValidation class for Kulback-Leibler divergence calculation. 
+                                         If not empty, must provide keys: ('KL_threshold', 'filename_Fisher_loc', 'filename_Fisher_glob', 'validate').
+        make_nice_plots (bool): Make and save visualizations: scatterplots of source param distributions, inferred bias corner plots, source integrals as a function
+                                function of hyperparameters, etc.
+        
+        random_seed (int or None): seed for random processes throughout the code. If NoneType, no seed is implemented. Default is 42.
+    
+    Returns:
+        Bvac_loc (float): Savage-Dickey ratio preferring the vacuum 
+        Bvac_glob (float): Savage-Dickey ratio preferring the vacuum over the global hypothesis.
+        Bloc_glob (float): Savage-Dickey ratio preferring the local over the global hypothesis.
+    """
+
     def __init__(self, Npop, SNR_thresh, sef_kwargs,
                        filename,filename_Fishers=None,
                        true_hyper={'K':5e-3,'alpha':0.0,'beta':0.0,
@@ -578,51 +568,9 @@ class Hierarchical:
                        Tplunge_range = None,
                        T_LISA = 1.0, dt = 10.0, Mstar = 3e6,
                        M_random = int(1e4),
+                       Fisher_validation_kwargs = {},
                        make_nice_plots=False,
                        random_seed=42):
-        
-        """
-            This class generates a population of extreme-mass-ratio inspirals (EMRIs) 
-            for a fiducial set of hyperparameters on local and global perturbative effects on top of vacuum evolution 
-            and calculates the approximate Bayes factor (Savage-Dickey ratio) comparing 
-            three hypothesis: vacuum, vac+local effect only, vac+global effect only.
-
-        Args:
-            Npop (int): Number of EMRIs in the true population.
-            SNR_thresh (float): Signal-to-noise ratio threshold to claim 'detected' EMRI set.
-            sef_kwargs (dict): keyword arguments to provide to the StableEMRIFishers class. Must include:
-                               'EMRI_waveform_gen', 'param_names'. All others optional.
-
-            filename (string): folder name where the data is being stored. No default because impractical to not save results.
-            filename_Fisher (string): a sub-folder for storing Fisher files (book-keeping). If None, Fishers directly stored in filename. Default is None. 
-
-            true_hyper (dict): true values of all hyperparameters. Default are fiducial values consistent with a population of vacuum EMRIs.
-            cosmo_params (dict): true values of 'Omega_m0' (matter density), 'Omega_Lambda0' (DE density), and 'H0' (Hubble constant in m/s/Gpc).
-
-            source_bounds (dict): prior range on source parameters in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
-                                  Must be provided for all parameters. We assume flat priors in this range.
-            hyper_bounds (dict): prior range on population (hyper)params in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
-                                 Must be provided for all hyperparams. We assume flat priors in this range.
-
-            Tplunge_range (list): lower and upper bounds on the time-to-plunge on EMRIs in the population. This will be used to initialize p0's for all EMRIs.
-                                  Default is None corresponding to Tplunge_range = [0.5,T_LISA + 1.0].
-            
-            T_LISA (float): time (in years) of LISA observation window. Default is 1.0.
-            dt (float): LISA sampling frequency. Default is 1.0.
-            Mstar (float) Constant in prior_vac. Default is 3e6. We choose it here following https://arxiv.org/pdf/1703.09722. Future implementations can vary this also.
-
-            M_random (int): Number of random samples for Savage-Dickey ratio calculation. Default is int(1e4).
-            
-            make_nice_plots (bool): Make and save visualizations: scatterplots of source param distributions, inferred bias corner plots, source integrals as a function
-                                    function of hyperparameters, etc.
-            
-            random_seed (int or None): seed for random processes throughout the code. If NoneType, no seed is implemented. Default is 42.
-        
-        Returns:
-            Bvac_loc (float): Savage-Dickey ratio preferring the vacuum 
-            Bvac_glob (float): Savage-Dickey ratio preferring the vacuum over the global hypothesis.
-            Bloc_glob (float): Savage-Dickey ratio preferring the local over the global hypothesis.
-        """
 
         if isinstance(Npop, int):
             self.Npop = Npop
@@ -637,6 +585,8 @@ class Hierarchical:
         self.sef_kwargs['filename'] = self.filename_Fishers
 
         #true cosmology
+        self.cosmo_params = cosmo_params
+        
         self.Omega_m0 = cosmo_params['Omega_m0']
         self.Omega_Lambda0 = cosmo_params['Omega_Lambda0']
         self.H0 = cosmo_params['H0']
@@ -645,6 +595,8 @@ class Hierarchical:
         # K, alpha, beta are vacuum population hyperparameters
         # f, mu_Al, mu_nl, sigma_Al, sigma_nl are local-effect population hyperparameters
         # Gdot is the global-effect population hyperparameter.
+        self.true_hyper = true_hyper
+        
         self.K_truth = true_hyper['K']
         self.alpha_truth = true_hyper['alpha']
         self.beta_truth = true_hyper['beta']
@@ -663,6 +615,7 @@ class Hierarchical:
 
         #prior ranges on source parameters
         self.source_bounds = source_bounds
+        
         self.M_range = source_bounds['M']
         self.z_range = source_bounds['z']
         self.Al_range = source_bounds['Al']
@@ -690,6 +643,8 @@ class Hierarchical:
         self.dt = dt
 
         self.M_random = M_random
+
+        self.Fisher_validation_kwargs = Fisher_validation_kwargs
         
         self.make_nice_plots = make_nice_plots
 
@@ -827,9 +782,30 @@ class Hierarchical:
         if self.make_nice_plots:
             self.corner_plot_biases()
 
-        #############################################
+        #######################################################
+        #perform Fisher validation if KL_threshold is provided
+        #######################################################
+
+        if len(self.Fisher_validation_kwargs.keys()) > 0:
+            print('Validating Fishers using KL-divergence...')
+            
+            self.KL_threshold = self.Fisher_validation_kwargs['KL_threshold']
+            _, filename_Fishers = os.path.split(self.filename_Fishers)
+            self.filename_Fishers_loc = self.Fisher_validation_kwargs['filename_Fishers_loc']
+            self.filename_Fishers_glob = self.Fisher_validation_kwargs['filename_Fishers_glob']
+            validate = self.Fisher_validation_kwargs['validate']
+
+            fishervalidate = FisherValidation(self.sef_kwargs,
+                     self.filename, filename_Fishers, self.filename_Fishers_loc, self.filename_Fishers_glob,
+                     self.true_hyper, self.cosmo_params, self.source_bounds, self.hyper_bounds,
+                     self.T_LISA, self.dt,
+                     validate)
+    
+            fishervalidate()
+
+        #############################################################
         #calculating the Savage-Dickey ratios in different hypotheses        
-        #############################################
+        #############################################################
 
         #savage-dickey preferring the vacuum hypothesis over local
         Bvac_loc = self.savage_dickey_vacloc()
@@ -1040,10 +1016,11 @@ class Hierarchical:
         bounds_vac = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z']}
 
         for i in range(len(self.detected_EMRIs)):
+            
             out_of_bounds = False
             index = int(self.detected_EMRIs[i]["index"])
             Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
-    
+            
             vacparams = self.detected_EMRIs[i]["vacuum_params"] # logMvac, zvac, Alvac, nlvac, Agvac
         
             for param,j in zip(bounds_vac.keys(),range(len(bounds_vac.keys()))):
@@ -1065,11 +1042,11 @@ class Hierarchical:
                             K=K, alpha=alpha, beta=beta, #variable hyperparameters
                             Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth))
 
-        warnings.warn(f"EMRIs out-of-bounds: {int(count)}")
+        warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
     
         return factorial(Nobs-1)*np.prod(np.array(Ivac_all))
 
-    def source_integral_loc(self,K,alpha,beta,f,mu_Al,mu_nl,sigma_Al,sigma_nl,Fishers_all):
+    def source_integral_loc(self,K,alpha,beta,f,mu_Al,mu_nl,sigma_Al,sigma_nl,Fishers_all,indices_all,locparams_all):
         
         """Calculate the source integral in the local hypothesis.
         bounds_loc is a dict of bounds on M, z, Al, nl. Bounds can be given for any subset of the parameters."""
@@ -1083,13 +1060,11 @@ class Hierarchical:
         bounds_loc = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
                       'Al':self.source_bounds['Al'],'nl':self.source_bounds['nl']} #prior range
     
-        for i in range(len(self.detected_EMRIs)):
+        for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
-            index = int(self.detected_EMRIs[i]["index"])
             Fisher = Fishers_all[i] #np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
-    
-            locparams = self.detected_EMRIs[i]["local_params"] # logMloc, zloc, Alloc, nlloc, Agloc
-        
+            locparams = locparams_all[i]
+            
             for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
                 if check_prior(locparams[j],bounds_loc[param]) == 1: #if the source parameters hits the upper limit
                     out_of_bounds = True
@@ -1119,11 +1094,11 @@ class Hierarchical:
 
         lnposterior = np.sum(np.log(np.array(Iloc_all))) #avoid overflow by calculating log posterior
         if count > 0.0:
-            warnings.warn(f"EMRIs out-of-bounds: {int(count)}")
+            warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
         
         return lnposterior
 
-    def source_integral_glob(self,K,alpha,beta,Gdot,Fishers_all):
+    def source_integral_glob(self,K,alpha,beta,Gdot,Fishers_all,indices_all,globparams_all):
         
         """Calculate the source integral in the global hypothesis.
         bounds_loc is a dict of bounds on M, z, Al, nl. Bounds can be given for any subset of the parameters."""
@@ -1137,12 +1112,11 @@ class Hierarchical:
         bounds_glob = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
                       'Ag':self.source_bounds['Ag']} #prior range
     
-        for i in range(len(self.detected_EMRIs)):
+        for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
-            index = int(self.detected_EMRIs[i]["index"])
             Fisher = Fishers_all[i] #np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
-            globparams = self.detected_EMRIs[i]["global_params"] # logMglob, zglob, Alglob, nlglob, Agglob
+            globparams = globparams_all[i] # logMglob, zglob, Alglob, nlglob, Agglob
             
             for param,j in zip(bounds_glob.keys(),range(len(bounds_glob.keys()))):
                 if check_prior(globparams[j],bounds_glob[param]) == 1: #if the source parameters hits the upper limit
@@ -1172,7 +1146,7 @@ class Hierarchical:
 
         lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
         if count > 0.0:
-            warnings.warn(f"EMRIs out-of-bounds: {int(count)}")
+            warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
 
         return lnposterior
 
@@ -1196,12 +1170,50 @@ class Hierarchical:
         f_samples = np.concatenate((f_samples,np.zeros(self.M_random-len(f_samples))))
 
         Fishers_all = []
+        indices_all = []
+        locparams_all = []      
         for i in range(len(self.detected_EMRIs)):
             index = int(self.detected_EMRIs[i]["index"])
+            indices_all.append(index)
             Fishers_all.append(np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy"))
+            locparams_all.append(self.detected_EMRIs[i]["local_params"])
 
+        indices_all = np.array(indices_all)
         Fishers_all = np.array(Fishers_all)
+        locparams_all = np.array(locparams_all)
+        
+        #only choose Fishers which satisfy the KL-divergence threshold, if available.
+        if len(self.Fisher_validation_kwargs.keys()) > 0:
+            if self.f_truth > 0:
+                Fishers_loc_KL = np.loadtxt(f'{self.filename}/Fishers_loc_KL.txt')
+                Fishers_all_KL = []
+                indices_all_KL = []
+                locparams_all_KL = []
+                j = 0
+                for i in range(len(self.detected_EMRIs)):
+                    Al = self.detected_EMRIs[i]['local_params'][2]
+                    nl = self.detected_EMRIs[i]['local_params'][3]
+                    Ag = self.detected_EMRIs[i]['local_params'][4] #will be zero in local hypothesis
+                    ng = 4.0
+            
+                    if check_prior(Al,self.source_bounds['Al']) != 0.:
+                        continue #ignore inferred EMRIs beyond the source bounds.
+                    if check_prior(nl,self.source_bounds['nl']) != 0.:
+                        continue #ignore inferred EMRIs beyond the source bounds.
 
+                    if Fishers_loc_KL[j] < self.KL_threshold: #KL-divergence of jth source should be less than the threshold.
+                        Fishers_all_KL.append(Fishers_all[j])
+                        indices_all_KL.append(indices_all[j])
+                        locparams_all_KL.append(locparams_all[j])
+
+                    j += 1 #hacky afterthought to cycle through Fishers_loc_KL
+
+                Fishers_all = np.array(Fishers_all_KL) #update Fishers_all
+                indices_all = np.array(indices_all_KL) #update indices_all
+
+                if len(Fishers_all) != len(self.detected_EMRIs):
+                    warnings.warn(f"After KL-divergence validation, only {len(Fishers_all)} sources remain.")
+        
         lnprodIsource = []
         removed_indices = []
     
@@ -1209,7 +1221,7 @@ class Hierarchical:
             lnprodIsource_j = self.source_integral_loc(K=K_samples[j],alpha=alpha_samples[j],beta=beta_samples[j],
                                                         f=f_samples[j],mu_Al=mu_Al_samples[j],mu_nl=mu_nl_samples[j],
                                                         sigma_Al=sigma_Al_samples[j],sigma_nl=sigma_nl_samples[j],
-                                                        Fishers_all=Fishers_all)
+                                                        Fishers_all=Fishers_all, indices_all=indices_all,locparams_all=locparams_all)
             
             lnprodIsource.append(lnprodIsource_j)
     
@@ -1311,20 +1323,56 @@ class Hierarchical:
         #make sure Gdot_samples have at least 10% draws at the null value for SD calculation
         Gdot_samples = Gdot_samples[:int(0.9*self.M_random)]
         Gdot_samples = np.concatenate((Gdot_samples,np.zeros(self.M_random-len(Gdot_samples))))
-        
+
+        indices_all = []
         Fishers_all = []
+        globparams_all = []
         for i in range(len(self.detected_EMRIs)):
             index = int(self.detected_EMRIs[i]["index"])
+            indices_all.append(index)
             Fishers_all.append(np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy"))
+            globparams_all.append(self.detected_EMRIs[i]["global_params"])
 
+        indices_all = np.array(indices_all)
         Fishers_all = np.array(Fishers_all)
+        globparams_all = np.array(globparams_all)
+
+        #only choose Fishers which satisfy the KL-divergence threshold, if available.
+        if len(self.Fisher_validation_kwargs.keys()) > 0:
+            if self.Gdot_truth > 0:
+                Fishers_glob_KL = np.loadtxt(f'{self.filename}/Fishers_glob_KL.txt')
+                Fishers_all_KL = []
+                indices_all_KL = []
+                globparams_all_KL = []
+                j = 0
+                for i in range(len(self.detected_EMRIs)):
+                    Al = self.detected_EMRIs[i]['global_params'][2] #will be zero in global hypothesis
+                    nl = self.detected_EMRIs[i]['global_params'][3] #will be zero in global hypothesis
+                    Ag = self.detected_EMRIs[i]['global_params'][4] 
+                    ng = 4.0
+            
+                    if check_prior(Ag,self.source_bounds['Ag']) != 0.:
+                        continue #ignore inferred EMRIs beyond the source bounds.
+                    
+                    if Fishers_glob_KL[j] < self.KL_threshold: #KL-divergence of jth source should be less than the threshold.
+                        Fishers_all_KL.append(Fishers_all[j])
+                        indices_all_KL.append(indices_all[j])
+                        globparams_all_KL.append(globparams_all[j])
+
+                    j += 1 #hacky afterthought to cycle through Fishers_glob_KL
+
+                Fishers_all = np.array(Fishers_all_KL) #update Fishers_all
+                indices_all = np.array(indices_all_KL) #update indices_all
+
+                if len(Fishers_all) != len(self.detected_EMRIs):
+                    warnings.warn(f"After KL-divergence validation, only {len(Fishers_all)} sources remain.")
     
         lnprodIsource = []
         #removed_indices = []
         for j in tqdm(range(self.M_random)):
                 
             lnprodIsource_j = self.source_integral_glob(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
-                                                  Gdot=Gdot_samples[j],Fishers_all=Fishers_all)
+                                                  Gdot=Gdot_samples[j],Fishers_all=Fishers_all,indices_all=indices_all,globparams_all=globparams_all)
 
             #print(K_samples[j], alpha_samples[j], beta_samples[j], Gdot_samples[j], prodIsource_j)
     
