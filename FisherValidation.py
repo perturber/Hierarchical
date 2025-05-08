@@ -48,11 +48,37 @@ def Fisher_KL(Gamma1, Gamma2):
 
 class FisherValidation:
 
+    """
+    Calculate the KL divergence between Fisher Information matrices at the true parameter point v/s at the bias-corrected point in a given hypothesis.
+    
+    args:
+    
+        sef_kwargs (dict): arguments for initializing the StableEMRIFisher class.
+        filename (string): folder name where the data is being stored. No default because impractical to not save results.
+        filename_Fishers (string): a sub-folder for storing Fisher files (book-keeping). If None, Fishers directly stored in filename.
+        
+        filename_Fishers_loc (string): name of the subfolder where Fisher matrices in the local hypothesis are/will be stored.
+        filename_Fishers_glob (string): name of the subfolder where Fisher matrices in the global hypothesis are/will be stored.
+        
+        true_hyper (dict): true values of all hyperparameters. Default are fiducial values consistent with a population of vacuum EMRIs.
+        cosmo_params (dict): true values of 'Omega_m0' (matter density), 'Omega_Lambda0' (DE density), and 'H0' (Hubble constant in m/s/Gpc).
+
+        source_bounds (dict): prior range on source parameters in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
+                              Must be provided for all parameters. We assume flat priors in this range.
+        hyper_bounds (dict): prior range on population (hyper)params in all three hypotheses. Keys are param names and values are lists of lower and upper bounds. 
+                             Must be provided for all hyperparams. We assume flat priors in this range.
+                             
+        T_LISA (float): time (in years) of LISA observation window. Default is 1.0.
+        dt (float): LISA sampling frequency. Default is 1.0.
+        
+        validate (bool): Whether to calculate Fisher matrices at the biased parameter point. Default is True.
+    """
+
     def __init__(self, sef_kwargs,
                  filename, filename_Fishers, filename_Fishers_loc, filename_Fishers_glob,
                  true_hyper, cosmo_params, source_bounds, hyper_bounds,
                  T_LISA, dt,
-                 validate=False):
+                 validate=True):
 
         self.filename = filename
         self.filename_Fishers = os.path.join(self.filename,filename_Fishers)
