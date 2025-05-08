@@ -5,6 +5,7 @@ Decoupling local and global Beyond vacuum-GR effects in EMRIs with hierarchical 
 
 Dependencies:
 - [`FastEMRIWaveforms(FEW)`](https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms) (modified version with two beyond-vacuum-GR effects). Access will be provided upon request.
+- [`StableEMRIFisher(SEF)`](https://github.com/perturber/StableEMRIFisher) Modified version for the hierarchical analysis is provided in the repo.
 - [`LISAanalysistools(LAT)`](https://github.com/mikekatz04/LISAanalysistools/tree/main). Specific version of this open-source tool is made available as a zip file.
 - [`lisa-on-gpu`](https://github.com/mikekatz04/lisa-on-gpu/tree/master). Specific version of this open-source tool is made available as a zip file.
 
