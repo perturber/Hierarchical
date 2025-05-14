@@ -1244,11 +1244,6 @@ class Hierarchical:
                     Ag = self.detected_EMRIs[i]['local_params'][4] #will be zero in local hypothesis
                     ng = 4.0
             
-                    if check_prior(Al,self.source_bounds['Al']) != 0.:
-                        continue #ignore inferred EMRIs beyond the source bounds.
-                    if check_prior(nl,self.source_bounds['nl']) != 0.:
-                        continue #ignore inferred EMRIs beyond the source bounds.
-
                     if Fishers_loc_KL[j] < self.KL_threshold: #KL-divergence of jth source should be less than the threshold.
                         Fishers_all_KL.append(Fishers_all[j])
                         indices_all_KL.append(indices_all[j])
@@ -1403,9 +1398,6 @@ class Hierarchical:
                     Ag = self.detected_EMRIs[i]['global_params'][4] 
                     ng = 4.0
             
-                    if check_prior(Ag,self.source_bounds['Ag']) != 0.:
-                        continue #ignore inferred EMRIs beyond the source bounds.
-                    
                     if Fishers_glob_KL[j] < self.KL_threshold: #KL-divergence of jth source should be less than the threshold.
                         Fishers_all_KL.append(Fishers_all[j])
                         indices_all_KL.append(indices_all[j])
