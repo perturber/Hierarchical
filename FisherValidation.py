@@ -245,7 +245,7 @@ class FisherValidation:
         
                 Fisher_transformed = J.T@Fisher_i@J
                 
-                with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}", "a") as f:
+                with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.h5", "a") as f:
                     if not "Fisher_transformed" in f:
                         f.create_dataset("Fisher_transformed", data = Fisher_transformed)
 
