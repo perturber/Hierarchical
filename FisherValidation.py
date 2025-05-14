@@ -5,17 +5,18 @@ from tqdm import tqdm
 import os
 import cupy as cp
 import pickle
-import corner
 import time
+import h5py
 
 from stableemrifisher.fisher import StableEMRIFisher
 from stableemrifisher.utils import inner_product, generate_PSD, padding
 
 from few.utils.utility import get_p_at_t
 from few.trajectory.inspiral import EMRIInspiral
-from few.waveform import GenerateEMRIWaveform, Joint_RelativisticKerrCircularFlux
+from few.waveform import GenerateEMRIWaveform
 from few.summation.aakwave import AAKSummation
-from few.utils.constants import YRSID_SI, C_SI
+from few.utils.constants import YRSID_SI 
+from few.utils.constants import SPEED_OF_LIGHT as C_SI
 
 from fastlisaresponse import ResponseWrapper  # Response function 
 from lisatools.detector import ESAOrbits #ESAOrbits correspond to esa-trailing-orbits.h5
@@ -72,6 +73,7 @@ class FisherValidation:
         dt (float): LISA sampling frequency. Default is 1.0.
         
         validate (bool): Whether to calculate Fisher matrices at the biased parameter point. Default is True.
+        plot_KL (bool): plot the KL divergences on all param indices. Default is False.
     """
 
     def __init__(self, sef_kwargs,
@@ -87,7 +89,7 @@ class FisherValidation:
         
         self.sef_kwargs = sef_kwargs
 
-        self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy',allow_pickle=True)
+        self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy', allow_pickle=True)
 
         #true cosmology
         self.Omega_m0 = cosmo_params['Omega_m0']
@@ -111,6 +113,7 @@ class FisherValidation:
         self.transform_Fisher_at_bias()
 
         self.calculate_KL()
+        
 
     def calculate_Fisher_at_bias(self):
 
@@ -139,11 +142,6 @@ class FisherValidation:
                 Ag = detected_EMRIs[i]['local_params'][4] #will be zero in local hypothesis
                 ng = 4.0
         
-                if check_prior(Al,self.source_bounds['Al']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
-                if check_prior(nl,self.source_bounds['nl']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
-        
                 T = self.T_LISA
                 dt = self.dt
         
@@ -151,12 +149,14 @@ class FisherValidation:
         
                 param_list = [M,mu,a,p0,e0,Y0,
                               dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
-                              Al,nl,Ag,ng]
+                             ]
+                             
+                add_param_args = {"Al":Al, "nl":nl, "Ag":Ag, "ng":ng}
         
-                sef_kwargs['filename'] = self.filename_Fishers_loc
-                sef_kwargs['suffix'] = detected_EMRIs[i]['index']
+                self.sef_kwargs['filename'] = self.filename_Fishers_loc
+                self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
         
-                sef = StableEMRIFisher(*param_list, **emri_kwargs, **sef_kwargs)
+                sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
                 sef()
     
         #calculate Fishers at the biased point in the global hypothesis
@@ -182,9 +182,6 @@ class FisherValidation:
                 Ag = detected_EMRIs[i]['global_params'][4]
                 ng = 4.0
         
-                if check_prior(Ag,self.source_bounds['Ag']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
-        
                 T = self.T_LISA
                 dt = self.dt
         
@@ -192,12 +189,14 @@ class FisherValidation:
         
                 param_list = [M,mu,a,p0,e0,Y0,
                               dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
-                              Al,nl,Ag,ng]
+                             ]
+                             
+                add_param_args = {"Al":Al, "nl":nl, "Ag":Ag, "ng":ng}
         
-                self.sef_kwargs['filename'] = self.filename_Fishers_glob
+                self.sef_kwargs['filename'] = self.filename_Fishers_loc
                 self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
         
-                sef = StableEMRIFisher(*param_list, **emri_kwargs, **self.sef_kwargs)
+                sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
                 sef()
 
     def transform_Fisher_at_bias(self):
@@ -211,11 +210,6 @@ class FisherValidation:
                 nl = detected_EMRIs[i]['local_params'][3]
                 Ag = detected_EMRIs[i]['local_params'][4] #will be zero in local hypothesis
                 ng = 4.0
-        
-                if check_prior(Al,self.source_bounds['Al']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
-                if check_prior(nl,self.source_bounds['nl']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
                     
                 #transform Fishers_loc[index]
                 M_i = np.exp(detected_EMRIs[i]['local_params'][0])
@@ -223,11 +217,13 @@ class FisherValidation:
                 
                 J = Jacobian(M_i, dist_i,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
-                Fisher_i = np.load(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.npy")
-        
+                with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                    Fisher_i = f["Fisher"][:]
+                
                 Fisher_transformed = J.T@Fisher_i@J
                 
-                np.save(f"{self.filename_Fishers_loc}/Fisher_transformed_{detected_EMRIs[i]['index']}",Fisher_transformed)
+                with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "a") as f:
+                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
         
         if self.true_hyper['Gdot'] > 0.0:
             for i in range(len(detected_EMRIs)):
@@ -236,21 +232,20 @@ class FisherValidation:
                 nl = detected_EMRIs[i]['global_params'][3] #will be zero in global hypothesis
                 Ag = detected_EMRIs[i]['global_params'][4]
                 ng = 4.0
-        
-                if check_prior(Ag,self.source_bounds['Ag']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
                 
                 #transform Fishers_glob[index]
                 M_i = np.exp(detected_EMRIs[i]['global_params'][0])
                 dist_i = getdistGpc(detected_EMRIs[i]['global_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
                 J = Jacobian(M_i, dist_i,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
-        
-                Fisher_i = np.load(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.npy")
+                
+                with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                    Fisher_i = f["Fisher"][:]
         
                 Fisher_transformed = J.T@Fisher_i@J
                 
-                np.save(f"{self.filename_Fishers_glob}/Fisher_transformed_{detected_EMRIs[i]['index']}",Fisher_transformed)
+                with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}", "a") as f:
+                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
 
     def calculate_KL(self):
 
@@ -264,13 +259,11 @@ class FisherValidation:
                 Ag = detected_EMRIs[i]['local_params'][4] #will be zero in local hypothesis
                 ng = 4.0
         
-                if check_prior(Al,self.source_bounds['Al']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
-                if check_prior(nl,self.source_bounds['nl']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
-        
-                Gamma1 = np.load(f"{self.filename_Fishers}/Fisher_transformed_{detected_EMRIs[i]['index']}.npy") #true Fisher at biased inference point
-                Gamma2 = np.load(f"{self.filename_Fishers_loc}/Fisher_transformed_{detected_EMRIs[i]['index']}.npy") #Fisher at injection
+                with h5py.File(f"{self.filename_Fishers}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                    Gamma1 = f["Fisher_transformed"][:] #true Fisher at biased inference point
+                
+                with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                    Gamma2 = f["Fisher_transformed"][:] #Fisher at injection
         
                 KL_loc.append(Fisher_KL(Gamma1,Gamma2))
         
@@ -284,20 +277,25 @@ class FisherValidation:
                 nl = detected_EMRIs[i]['global_params'][3] #will be zero in global hypothesis
                 Ag = detected_EMRIs[i]['global_params'][4]
                 ng = 4.0
-            
-                if check_prior(Ag,self.source_bounds['Ag']) != 0.:
-                    continue #ignore inferred EMRIs beyond the source bounds.
         
-                Gamma1 = np.load(f"{self.filename_Fishers}/Fisher_transformed_{detected_EMRIs[i]['index']}.npy") #true Fisher at biased inference point
-                Gamma2 = np.load(f"{self.filename_Fishers_glob}/Fisher_transformed_{detected_EMRIs[i]['index']}.npy") #Fisher at injection
+                with h5py.File(f"{self.filename_Fishers}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                    Gamma1 = f["Fisher_transformed"][:] #true Fisher at biased inference point
+                    
+                with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                    Gamma2 = f["Fisher_transformed"][:] #Fisher at injection
         
                 KL_glob.append(Fisher_KL(Gamma1,Gamma2))
         
             self.KL_glob = np.array(KL_glob)
             np.savetxt(f'{self.filename}/Fishers_glob_KL.txt',self.KL_glob)
 
-    def plot_KL(self):
+    def KL_divergence_plot(self,plots_folder=None):
+    
+        if plots_folder == None:
+            plots_folder = f'{self.filename}/fancy_plots'
 
+        print("Plotting KL divergences...")
+        
         #plot the KL-divergence for each index
         if self.true_hyper['f'] > 0.0:
             plt.figure(figsize=(7,5))
@@ -307,7 +305,7 @@ class FisherValidation:
             plt.ylabel(r'$KL(\Gamma_{\rm inj},\Gamma_{\rm bias}|\rm{local})$',fontsize=16)
             plt.legend()
             plt.yscale('log')
-            plt.savefig(f'{self.filename}/fancy_plots/Fishers_loc_KL.png',dpi=300,bbox_inches='tight')
+            plt.savefig(f'{plots_folder}/Fishers_loc_KL.png',dpi=300,bbox_inches='tight')
             plt.close()
         
         if self.true_hyper['Gdot'] > 0.0:
@@ -318,5 +316,5 @@ class FisherValidation:
             plt.ylabel(r'$KL(\Gamma_{\rm inj},\Gamma_{\rm bias}|\rm{global})$',fontsize=16)
             plt.legend()
             plt.yscale('log')
-            plt.savefig(f'{self.filename}/fancy_plots/Fishers_glob_KL.png',dpi=300,bbox_inches='tight')
+            plt.savefig(f'{plots_folder}//Fishers_glob_KL.png',dpi=300,bbox_inches='tight')
             plt.close()

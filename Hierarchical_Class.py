@@ -5,17 +5,23 @@ from tqdm import tqdm
 import os
 import cupy as cp
 import pickle
-import corner
 import time
+import h5py
 
 from stableemrifisher.fisher import StableEMRIFisher
 from stableemrifisher.utils import inner_product, generate_PSD, padding
 
 from few.utils.utility import get_p_at_t
 from few.trajectory.inspiral import EMRIInspiral
-from few.waveform import GenerateEMRIWaveform, Joint_RelativisticKerrCircularFlux
+from few.trajectory.ode import KerrEccEqFlux
+
+from JointWave import JointKerrWaveform, JointRelKerrEccFlux
+
+from few.waveform import GenerateEMRIWaveform
 from few.summation.aakwave import AAKSummation
-from few.utils.constants import YRSID_SI, C_SI
+from few.utils.constants import YRSID_SI
+from few.utils.constants import SPEED_OF_LIGHT as C_SI
+from few.utils.geodesic import ELQ_to_pex, get_kerr_geo_constants_of_motion
 
 from fastlisaresponse import ResponseWrapper  # Response function 
 from lisatools.detector import ESAOrbits #ESAOrbits correspond to esa-trailing-orbits.h5
@@ -156,7 +162,7 @@ def other_param_samples(N,M_samples,Tplunge_range,seed):
 def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,filename):
     np.random.seed(seed)
     
-    traj_xy = EMRIInspiral(func="Joint_Relativistic_Kerr_Circ_Flux")
+    traj_xy = EMRIInspiral(func=JointRelKerrEccFlux)
     
     p0samps = []
     
@@ -173,14 +179,13 @@ def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,
                                Alsamps[i],
                                nlsamps[i],
                                Agsamps[i],
-                               4.0 #ng
+                               4.0, #ng
                               ],
-                              traj_kwargs={'DENSE_STEPPING':0,'err':1e-8, #err reduced because these are just trajs
-                                           'max_init_len':int(1e6)})
+                              )
         
-        p0samps.append(p_plunge)
+        p0samps.append(p_plunge + 1.0)
 
-    np.save(f"{filename}/p0samps",p0samps)
+    np.savetxt(f"{filename}/p0samps.txt",p0samps)
     
     return np.array(p0samps)
     
@@ -546,6 +551,7 @@ class Hierarchical:
                                          If not empty, must provide keys: ('KL_threshold', 'filename_Fisher_loc', 'filename_Fisher_glob', 'validate').
         make_nice_plots (bool): Make and save visualizations: scatterplots of source param distributions, inferred bias corner plots, source integrals as a function
                                 function of hyperparameters, etc.
+        plots_filename (string): custom filename for the plots file if make_nice_plots is True. If not provided, but make_nice_plots is True, plots are saved under the default name "fancy_plots". 
         
         random_seed (int or None): seed for random processes throughout the code. If NoneType, no seed is implemented. Default is 42.
     
@@ -569,7 +575,9 @@ class Hierarchical:
                        T_LISA = 1.0, dt = 10.0, Mstar = 3e6,
                        M_random = int(1e4),
                        Fisher_validation_kwargs = {},
+                       out_of_bound_nature = 'edge',
                        make_nice_plots=False,
+                       plots_filename='fancy_plots',
                        random_seed=42):
 
         if isinstance(Npop, int):
@@ -645,11 +653,18 @@ class Hierarchical:
         self.M_random = M_random
 
         self.Fisher_validation_kwargs = Fisher_validation_kwargs
-        
+
+        if out_of_bound_nature in ['edge', 'remove']:
+            self.out_of_bound_nature = out_of_bound_nature
+        else:
+            warnings.warn("valid option for out_of_bound_nature: ['edge','remove']. Assuming default ('edge').")
+            self.out_of_bound_nature = 'edge'
+            
         self.make_nice_plots = make_nice_plots
 
         if self.make_nice_plots:
-            self.plots_folder = os.path.join(self.filename, "fancy_plots")
+            self.plots_folder = os.path.join(self.filename, plots_filename)
+                
             os.makedirs(self.plots_folder, exist_ok=True)
 
         self.seed = random_seed
@@ -715,7 +730,7 @@ class Hierarchical:
          self.T_truth_samples) = other_param_samples(N=self.Npop,M_samples=self.M_truth_samples,Tplunge_range=self.Tplunge_range,seed=self.seed)
         
         try:
-            self.p0_truth_samples = np.load(f"{self.filename}/p0samps.npy")
+            self.p0_truth_samples = np.loadtxt(f"{self.filename}/p0samps.txt")
             print("p0 samples found")
         except FileNotFoundError:
             print("calculating p0 samples")
@@ -759,16 +774,21 @@ class Hierarchical:
         Fisher_index = np.array(Fisher_index)
 
         for index, i in zip(Fisher_index,range(len(Fisher_index))):
-            Fisher_i = np.load(f"{self.filename_Fishers}/Fisher_{index}.npy")
+        
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
+                Gamma_i = f["Fisher"][:]
+    
             dist_i = self.detected_EMRIs[i]['true_params'][6] #true_params[6] = dist
             M_i = self.detected_EMRIs[i]['true_params'][0] #true_params[0] = M
             
             J = Jacobian(M_i, dist_i,self.H0,self.Omega_m0,self.Omega_Lambda0)
             
-            Fisher_transformed = J.T@Fisher_i@J
+            Fisher_transformed = J.T@Gamma_i@J
         
-            np.save(f"{self.filename_Fishers}/Fisher_transformed_{index}",Fisher_transformed)
-            #print(np.linalg.eigvals(Fisher_i))
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
+                f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+                
+            #print(np.linalg.eigvals(Gamma_i))
             #print(np.linalg.eigvals(Fisher_transformed))
 
         ##################################################################
@@ -826,7 +846,7 @@ class Hierarchical:
         calculate and save the FIMs and parameter values. """
 
         try:
-            self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy',allow_pickle=True)
+            self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy', allow_pickle=True)
             all_SNRs = np.loadtxt(f'{self.filename}/all_SNRs.txt')
             
         except FileNotFoundError:
@@ -865,7 +885,9 @@ class Hierarchical:
     
                 param_list = [M,mu,a,p0,e0,Y0,
                               dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
-                              Al,nl,Ag,ng] #SEF param args
+                              ] #SEF param args (vacuum-GR EMRI)
+
+                add_param_args = {"Al":Al, "nl":nl, "Ag":Ag, "ng":ng} #dict of additional parameters
     
                 transformed_params = [np.log(M),self.z_truth_samples[i],Al,nl,Ag]
                 
@@ -873,7 +895,7 @@ class Hierarchical:
     
                 #print(param_list, self.T_truth_samples[i])
                 
-                sef = StableEMRIFisher(*param_list, **emri_kwargs, **self.sef_kwargs)
+                sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
                 all_SNRs.append(sef.SNRcalc_SEF())
     
                 if all_SNRs[i] >= self.SNR_thresh:
@@ -881,7 +903,8 @@ class Hierarchical:
                                                 'lambda_v':self.lambda_truth_vac, 'lambda_l':self.lambda_truth_loc, 'lambda_g':self.lambda_truth_glob,
                                                'transformed_params':np.array(transformed_params)})
                     try:
-                        _ = np.load(f"{self.filename_Fishers}/Fisher_{i}.npy")
+                        with h5py.File(f"{self.filename_Fishers}/Fisher_{i}.h5", "r") as f:
+                            Gamma_i = f["Fisher"][:]
                     except FileNotFoundError:
                         sef() #calculate and save the FIM for the detected EMRI
     
@@ -919,7 +942,8 @@ class Hierarchical:
             # Npsi: number of measured params
         
             index = int(self.detected_EMRIs[i]["index"])
-            Gamma_i = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
+                Gamma_i = f["Fisher_transformed"][:] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
             if hypothesis == 'vacuum':
                 #vacuum hypothesis
@@ -1019,7 +1043,8 @@ class Hierarchical:
             
             out_of_bounds = False
             index = int(self.detected_EMRIs[i]["index"])
-            Fisher = np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
+                Fisher = f["Fisher_transformed"][:] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
             
             vacparams = self.detected_EMRIs[i]["vacuum_params"] # logMvac, zvac, Alvac, nlvac, Agvac
         
@@ -1037,11 +1062,18 @@ class Hierarchical:
 
             if out_of_bounds:
                 count+=1
-                
-            Ivac_all.append(Isource_vac(M=np.exp(vacparams[0]),z=vacparams[1], 
-                            K=K, alpha=alpha, beta=beta, #variable hyperparameters
-                            Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth))
 
+            Ivac_i = Isource_vac(M=np.exp(vacparams[0]),z=vacparams[1], 
+                                K=K, alpha=alpha, beta=beta, #variable hyperparameters
+                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth)
+
+            if out_of_bounds and self.out_of_bound_nature == 'remove':
+                Ivac_all.append(1.0)
+                Nobs -= 1
+
+            else:
+                Ivac_all.append(Ivac_i)
+    
         warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
     
         return factorial(Nobs-1)*np.prod(np.array(Ivac_all))
@@ -1062,7 +1094,7 @@ class Hierarchical:
     
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
-            Fisher = Fishers_all[i] #np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            Fisher = Fishers_all[i] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
             locparams = locparams_all[i]
             
             for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
@@ -1086,9 +1118,14 @@ class Hierarchical:
                                 Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
                                 Mstar=self.Mstar_truth)
     
-            if np.isnan(Iloc_i):
+            if out_of_bounds and self.out_of_bound_nature == 'remove':
                 Iloc_all.append(1.0)
                 Nobs -= 1
+                
+            elif np.isnan(Iloc_i):
+                Iloc_all.append(1.0)
+                Nobs -= 1
+                
             else:
                 Iloc_all.append(Iloc_i)
 
@@ -1114,7 +1151,7 @@ class Hierarchical:
     
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
-            Fisher = Fishers_all[i] #np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy") #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            Fisher = Fishers_all[i] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
             globparams = globparams_all[i] # logMglob, zglob, Alglob, nlglob, Agglob
             
@@ -1138,9 +1175,14 @@ class Hierarchical:
                                   Gdot=Gdot,Mstar=self.Mstar_truth,
                                   Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
             
-            if np.isnan(Iglob_i):
+            if out_of_bounds and self.out_of_bound_nature == 'remove':
                 Iglob_all.append(1.0)
                 Nobs -= 1
+
+            elif np.isnan(Iglob_i):
+                Iglob_all.append(1.0)
+                Nobs -= 1
+                
             else:
                 Iglob_all.append(Iglob_i)
 
@@ -1175,7 +1217,12 @@ class Hierarchical:
         for i in range(len(self.detected_EMRIs)):
             index = int(self.detected_EMRIs[i]["index"])
             indices_all.append(index)
-            Fishers_all.append(np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy"))
+            
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
+                Fish_trans = f["Fisher_transformed"][:]
+                
+            Fishers_all.append(Fish_trans)
+            
             locparams_all.append(self.detected_EMRIs[i]["local_params"])
 
         indices_all = np.array(indices_all)
@@ -1330,7 +1377,11 @@ class Hierarchical:
         for i in range(len(self.detected_EMRIs)):
             index = int(self.detected_EMRIs[i]["index"])
             indices_all.append(index)
-            Fishers_all.append(np.load(f"{self.filename_Fishers}/Fisher_transformed_{index}.npy"))
+            
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
+                Fish_trans = f["Fisher_transformed"][:]
+                
+            Fishers_all.append(Fish_trans)
             globparams_all.append(self.detected_EMRIs[i]["global_params"])
 
         indices_all = np.array(indices_all)

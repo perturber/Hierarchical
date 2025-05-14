@@ -5,7 +5,6 @@ from tqdm import tqdm
 import os
 import cupy as cp
 import pickle
-import corner
 import time
 
 from stableemrifisher.fisher import StableEMRIFisher
@@ -13,9 +12,10 @@ from stableemrifisher.utils import inner_product, generate_PSD, padding
 
 from few.utils.utility import get_p_at_t
 from few.trajectory.inspiral import EMRIInspiral
-from few.waveform import GenerateEMRIWaveform, Joint_RelativisticKerrCircularFlux
+from few.waveform import GenerateEMRIWaveform
 from few.summation.aakwave import AAKSummation
-from few.utils.constants import YRSID_SI, C_SI
+from few.utils.constants import YRSID_SI 
+from few.utils.constants import SPEED_OF_LIGHT as C_SI
 
 from fastlisaresponse import ResponseWrapper  # Response function 
 from lisatools.detector import ESAOrbits #ESAOrbits correspond to esa-trailing-orbits.h5
