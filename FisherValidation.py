@@ -193,7 +193,7 @@ class FisherValidation:
                              
                 add_param_args = {"Al":Al, "nl":nl, "Ag":Ag, "ng":ng}
         
-                self.sef_kwargs['filename'] = self.filename_Fishers_loc
+                self.sef_kwargs['filename'] = self.filename_Fishers_glob
                 self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
         
                 sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
@@ -223,7 +223,8 @@ class FisherValidation:
                 Fisher_transformed = J.T@Fisher_i@J
                 
                 with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "a") as f:
-                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+                    if not "Fisher_transformed" in f:
+                        f.create_dataset("Fisher_transformed", data = Fisher_transformed)
         
         if self.true_hyper['Gdot'] > 0.0:
             for i in range(len(detected_EMRIs)):
@@ -245,7 +246,8 @@ class FisherValidation:
                 Fisher_transformed = J.T@Fisher_i@J
                 
                 with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}", "a") as f:
-                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+                    if not "Fisher_transformed" in f:
+                        f.create_dataset("Fisher_transformed", data = Fisher_transformed)
 
     def calculate_KL(self):
 

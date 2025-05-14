@@ -777,7 +777,7 @@ class Hierarchical:
         
             with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
                 Gamma_i = f["Fisher"][:]
-    
+                    
             dist_i = self.detected_EMRIs[i]['true_params'][6] #true_params[6] = dist
             M_i = self.detected_EMRIs[i]['true_params'][0] #true_params[0] = M
             
@@ -786,7 +786,8 @@ class Hierarchical:
             Fisher_transformed = J.T@Gamma_i@J
         
             with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
-                f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+                if not "Fisher_transformed" in f:
+                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
                 
             #print(np.linalg.eigvals(Gamma_i))
             #print(np.linalg.eigvals(Fisher_transformed))
