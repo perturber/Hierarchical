@@ -4,10 +4,10 @@ Decoupling local and global Beyond vacuum-GR effects in EMRIs with hierarchical 
 ## Installation Guide
 
 Dependencies:
-- [`FastEMRIWaveforms(FEW)`](https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms). Modified version with two beyond-vacuum-GR effects: [click here](https://zenodo.org/uploads/14849432?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6Ijg5NjBhODU5LTRhOTQtNDYxOC1hNmJjLTExMjRkYmQzYmQ2NyIsImRhdGEiOnt9LCJyYW5kb20iOiIzNzVlMDIxMjJkOTBmNTFkMDVhZTM2MWMyZjNmZjNmMSJ9.jhXVK-A9p7Oy8Zn-pIgCevP0wSeH0RmrdD4gQqNnNfHpfOA4ciAniUlnvBkXMmdTXHY0UMVETx-nbRISnWLQJA).
-- [`StableEMRIFisher(SEF)`](https://github.com/perturber/StableEMRIFisher) Modified version for the hierarchical analysis is provided in the repo.
-- [`LISAanalysistools(LAT)`](https://github.com/mikekatz04/LISAanalysistools/tree/main). Specific version of this open-source tool is made available as a zip file.
-- [`lisa-on-gpu`](https://github.com/mikekatz04/lisa-on-gpu/tree/master). Specific version of this open-source tool is made available as a zip file.
+- [`FastEMRIWaveforms(FEW)v2.0`]([https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms](https://github.com/znasipak/FastEMRIWaveforms-Soton-Hackathon-2025/tree/Kerr_Equatorial_Eccentric)). This branch is fully compatible with the default version, although [this](https://github.com/znasipak/FastEMRIWaveforms-Soton-Hackathon-2025/issues/55) issue needs fixing.
+- [`StableEMRIFisher(SEF)`]([https://github.com/perturber/StableEMRIFisher](https://github.com/perturber/StableEMRIFisher/tree/few2_package)). This branch is fully compatible with the default version.
+- [`LISAanalysistools(LAT)`](https://github.com/mikekatz04/LISAanalysistools/tree/main).
+- [`lisa-on-gpu`](https://github.com/mikekatz04/lisa-on-gpu/tree/master).
 
 Download the zip file and unzip contents. Here's a brief description of the different files:
 
