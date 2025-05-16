@@ -784,13 +784,19 @@ class Hierarchical:
             J = Jacobian(M_i, dist_i,self.H0,self.Omega_m0,self.Omega_Lambda0)
             
             Fisher_transformed = J.T@Gamma_i@J
-        
-            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
-                if not "Fisher_transformed" in f:
-                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+
+            if (np.linalg.eigvals(Fisher_transformed) < 0.0).any():
+                warnings.warn("positive-definiteness check failed for index: ", index)
+                warnings.warn(f"removing source {index}...")
+                self.detected_EMRIs = np.delete(self.detected_EMRIs, i)
                 
-            #print(np.linalg.eigvals(Gamma_i))
-            #print(np.linalg.eigvals(Fisher_transformed))
+            else:    
+                print("positive-definiteness check passed for index: ", index, ". Saving Fisher...")
+                with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
+                    if not "Fisher_transformed" in f:
+                        f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+                
+        np.save(f"{self.filename}/detected_EMRIs",self.detected_EMRIs) #save updated list with check on positive-definiteness of Fisher_transformed
 
         ##################################################################
         #calculating the biased inferrence params in all three hypotheses
@@ -823,6 +829,9 @@ class Hierarchical:
                      validate)
     
             fishervalidate()
+            
+            if self.make_nice_plots:
+                fishervalidate.KL_divergence_plot(self.plots_folder)
 
         #############################################################
         #calculating the Savage-Dickey ratios in different hypotheses        
