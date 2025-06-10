@@ -1477,7 +1477,7 @@ class Hierarchical:
         Fisher_index = np.array(Fisher_index)
         SNRs = np.array(SNRs)
         
-        params = ['$\M$','$z$','$A_l$','$n_l$','$A_g$']
+        params = ['$M$','$z$','$A_l$','$n_l$','$A_g$']
         param_lims = [self.M_range,self.z_range,self.Al_range,self.nl_range,self.Ag_range]
         fig, axs = plt.subplots(len(params),len(params),figsize=(40,40))
 
