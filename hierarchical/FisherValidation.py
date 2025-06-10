@@ -133,7 +133,7 @@ class FisherValidation:
         if self.true_hyper['f'] > 0.0:
             #if fraction of local EMRIs > 0, calculate FIM at biased point in local hypothesis
             for i in tqdm(range(len(detected_EMRIs))):
-                M = np.exp(detected_EMRIs[i]['local_params'][0])
+                M = detected_EMRIs[i]['local_params'][0]
                 mu = detected_EMRIs[i]['true_params'][1]
                 a = detected_EMRIs[i]['true_params'][2]
                 p0 = detected_EMRIs[i]['true_params'][3]
@@ -173,7 +173,7 @@ class FisherValidation:
         if self.true_hyper['Gdot'] > 0.0:
             #if Gdot > 0, calculate FIM at biased point in global hypothesis
             for i in tqdm(range(len(detected_EMRIs))):
-                M = np.exp(detected_EMRIs[i]['global_params'][0])
+                M = detected_EMRIs[i]['global_params'][0]
                 mu = detected_EMRIs[i]['true_params'][1]
                 a = detected_EMRIs[i]['true_params'][2]
                 p0 = detected_EMRIs[i]['true_params'][3]
@@ -222,7 +222,7 @@ class FisherValidation:
                 ng = 4.0
                     
                 #transform Fishers_loc[index]
-                M_i = np.exp(detected_EMRIs[i]['local_params'][0])
+                M_i = detected_EMRIs[i]['local_params'][0]
                 dist_i = getdistGpc(detected_EMRIs[i]['local_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
                 J = Jacobian(M_i, dist_i,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
@@ -245,7 +245,7 @@ class FisherValidation:
                 ng = 4.0
                 
                 #transform Fishers_glob[index]
-                M_i = np.exp(detected_EMRIs[i]['global_params'][0])
+                M_i = detected_EMRIs[i]['global_params'][0]
                 dist_i = getdistGpc(detected_EMRIs[i]['global_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
                 J = Jacobian(M_i, dist_i,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)

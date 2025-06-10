@@ -52,9 +52,6 @@ else:
     pass #let the backend decide for itself.
     
 #source parameter prior pdfs in all three hypotheses
-#supporting functions for prior_vac
-def Mz_func(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
-    return K*(M/Mstar)**alpha*(1+z)**beta*4*np.pi*dc(z,H0,Omega_m0,Omega_Lambda0)**2
 
 def prior_vac(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
     """
@@ -62,8 +59,9 @@ def prior_vac(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
     calculate the UNNORMALIZED probability distribution function of 
     obtaining the source params [M,z]
     """
-    
-    return Mz_func(M,z,K,alpha,beta,H0, Omega_m0,Omega_Lambda0, Mstar)
+    C = K*(1/Mstar)**alpha*4*np.pi
+
+    return C * (M)**alpha*(1+z)**beta * dc(z,H0,Omega_m0,Omega_Lambda0)**2
 
 def prior_loc(vec_l, f, mu_l, sigma_l):
     """
@@ -200,28 +198,6 @@ def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,
     return np.array(p0samps)
     
 #bias calculation functions
-def bias(psi_signal,phi_signal,multiplicative_factor):
-    """ 
-    Given a true signal with decomposed param set (psi, phi) and the multiplicative factor,
-    calculate the biased param vector psi_bias.
-    (See Eq. 11 in https://arxiv.org/abs/2312.13028)
-    """
-    # d: number of measured source params
-    # Nphi: number of unmeasured params
-    # Npsi: number of measured params
-
-    phi_signal = np.atleast_1d(phi_signal)
-    
-    delta_phi = phi_signal - np.zeros(len(phi_signal)) #1D array - 1D array = 1D array of length Nphi
-        
-    #print(delta_phi)
-    
-    delta_psi = multiplicative_factor@delta_phi # Npsi x Nphi array times Nphi 1D array: 1D array of length Npsi
-    
-    #print(psi_ML)
-
-    return psi_signal + delta_psi # Npsi 1D array + Npsi 1D array = Npsi 1D array
-
 def bias(psi_signal,phi_signal,multiplicative_factor):
     """ 
     Given a true signal with decomposed param set (psi, phi) and the multiplicative factor,
@@ -449,7 +425,7 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     M, z (np.float64) are the inferred vacuum parameters of the source. K, alpha, beta are the corresponding hyperparameters.
     vec_l (list/numpy 1d.array) = [Al, nl] is the list of inferred local effect parameters of the source.
     f (np.float64), mu_l = [mu_Al, mu_nl], sigma_l = [sigma_Al, sigma_nl] are the hyperparameters of the local effect.
-    Fisher = Fisher_psipsi with coordinates [lnM, z, Al, nl] 4x4
+    Fisher = Fisher_psipsi with coordinates [M, z, Al, nl] 4x4
     """
 
     sigma_l = np.array(sigma_l)
@@ -498,11 +474,11 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     psi_tilde_additional = np.zeros(dpsi)
     psi_tilde_additional[dl:] = Fisher_l@mu_l
 
-    psi_vec = np.array([np.log(M),z,Al,nl])
+    psi_vec = np.array([M,z,Al,nl])
                 
     psi_tilde = np.linalg.inv(Fisher_tilde)@(Fisher_psipsi@psi_vec  + psi_tilde_additional) #psi_tilde
     
-    lnM_tilde, z_tilde = psi_tilde[:dv] #v_tilde for I2 evaluation
+    M_tilde, z_tilde = psi_tilde[:dv] #v_tilde for I2 evaluation
     
     #standardization factor
     S = np.linalg.det(Fisher_loc+Fisher_l)**(1/2)/((2*np.pi)**(dpsi/2))*np.exp(-1/2*(vec_l - mu_l)@(Fisher_loc+Fisher_l)@(vec_l - mu_l))
@@ -512,7 +488,7 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
 
     #print(np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))
     
-    I2 = S*f*Isource_vac(M=np.exp(lnM_tilde), z=z_tilde, K=K, alpha=alpha, beta=beta, Fisher=Fisher, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)
+    I2 = S*f*Isource_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, Fisher=Fisher, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)
 
     #print(((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)))
     
@@ -716,7 +692,6 @@ class Hierarchical:
             plt.savefig(f'{self.plots_folder}/Al_nl_truth.png',dpi=300,bbox_inches='tight')
             plt.close()
 
-        
         #generating global effect parameter samples 
         self.Ag_truth_samples = Ag_samples(N=self.Npop,lambda_g=self.lambda_truth_glob)
 
@@ -771,7 +746,7 @@ class Hierarchical:
         #print(self.detected_EMRIs)
 
         ####################################################################
-        #transforming the Fishers from [M,dL,Al,nl,Ag] to [logM,z,Al,nl,Ag]
+        #transforming the Fishers from [M,dL,Al,nl,Ag] to [M,z,Al,nl,Ag]
         ####################################################################
 
         Fisher_index = []
@@ -793,10 +768,10 @@ class Hierarchical:
             
             J = Jacobian(M_i, dist_i,self.H0,self.Omega_m0,self.Omega_Lambda0)
             
-            Fisher_transformed = J.T@Gamma_i@J
+            Fisher_transformed = J.T@Gamma_i@J #Fisher transformed now [M, z, ...]
 
             if (np.linalg.eigvals(Fisher_transformed) < 0.0).any():
-                warnings.warn("positive-definiteness check failed for index: ", index)
+                warnings.warn("positive-semi-definiteness check failed for index: ", index)
                 warnings.warn(f"removing source {index}...")
                 self.detected_EMRIs = np.delete(self.detected_EMRIs, i)
                 
@@ -909,7 +884,7 @@ class Hierarchical:
 
                 add_param_args = {"Al":Al, "nl":nl, "Ag":Ag, "ng":ng} #dict of additional parameters
     
-                transformed_params = [np.log(M),self.z_truth_samples[i],Al,nl,Ag]
+                transformed_params = [M,self.z_truth_samples[i],Al,nl,Ag]
                 
                 emri_kwargs = {'T': T, 'dt': dt}
     
@@ -963,11 +938,11 @@ class Hierarchical:
         
             index = int(self.detected_EMRIs[i]["index"])
             with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
-                Gamma_i = f["Fisher_transformed"][:] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+                Gamma_i = f["Fisher_transformed"][:] #Fisher in transformed coords [M,z,Al,nl,Ag]
     
             if hypothesis == 'vacuum':
                 #vacuum hypothesis
-                indices_psi = [0,1]  #indices of measured params (lnM, z)
+                indices_psi = [0,1]  #indices of measured params (M, z)
                 indices_phi = [2,3,4] #indices of unmeasured params (Al, nl, Ag)
                 
                 i_psipsi = np.ix_(indices_psi,indices_psi)
@@ -985,11 +960,11 @@ class Hierarchical:
                 psi_i_inferred = bias(psi_i, phi_i, multiplicative_factor)
                 psi_i_inferred = np.concatenate((psi_i_inferred,[0.0,0.0,0.0])) #size = Npsi + Nphi
     
-                self.detected_EMRIs[i]["vacuum_params"] = np.array(psi_i_inferred) #save [lnM_bias,z_bias]
+                self.detected_EMRIs[i]["vacuum_params"] = np.array(psi_i_inferred) #save [M_bias,z_bias]
     
             if hypothesis == 'local':
                 #local hypothesis
-                indices_psi = [0,1,2,3]  #indices of measured params (lnM,z,Al,nl)
+                indices_psi = [0,1,2,3]  #indices of measured params (M,z,Al,nl)
                 indices_phi = [4] #indices of unmeasured params (Ag)
                 
                 i_psipsi = np.ix_(indices_psi,indices_psi)
@@ -1015,11 +990,11 @@ class Hierarchical:
                 """
                 psi_i_inferred = np.concatenate((psi_i_inferred,[0.0])) #size = Npsi + Nphi
     
-                self.detected_EMRIs[i]["local_params"] = np.array(psi_i_inferred) #save [lnM_bias,z_bias,Al_bias, nl_bias]
+                self.detected_EMRIs[i]["local_params"] = np.array(psi_i_inferred) #save [M_bias,z_bias,Al_bias, nl_bias]
     
             if hypothesis == 'global':
                 #global hypothesis
-                indices_psi = [0,1,4]  #indices of measured params (lnM,z,Ag)
+                indices_psi = [0,1,4]  #indices of measured params (M,z,Ag)
                 indices_phi = [2,3] #indices of unmeasured params (Al,nl)
                 
                 i_psipsi = np.ix_(indices_psi,indices_psi)
@@ -1041,7 +1016,7 @@ class Hierarchical:
                 """
                 psi_i_inferred = np.concatenate((np.concatenate((psi_i_inferred[:2],[0.0,0.0])),[psi_i_inferred[-1]]))
                 
-                self.detected_EMRIs[i]["global_params"] = np.array(psi_i_inferred) #save [lnM_bias,z_bias,Ag_bias]
+                self.detected_EMRIs[i]["global_params"] = np.array(psi_i_inferred) #save [M_bias,z_bias,Ag_bias]
 
         self.Nobs = len(self.detected_EMRIs) #number of detected EMRIs.
         np.save(f'{self.filename}/detected_EMRIs',self.detected_EMRIs)
@@ -1057,16 +1032,16 @@ class Hierarchical:
         Nobs = self.Nobs
         count = 0.0 #number of out of bound EMRIs
         
-        bounds_vac = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z']}
+        bounds_vac = {'M':self.source_bounds['M'],'z':self.source_bounds['z']}
 
         for i in range(len(self.detected_EMRIs)):
             
             out_of_bounds = False
             index = int(self.detected_EMRIs[i]["index"])
             with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
-                Fisher = f["Fisher_transformed"][:] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+                Fisher = f["Fisher_transformed"][:] #Fisher in transformed coords [M,z,Al,nl,Ag]
             
-            vacparams = self.detected_EMRIs[i]["vacuum_params"] # logMvac, zvac, Alvac, nlvac, Agvac
+            vacparams = self.detected_EMRIs[i]["vacuum_params"] # Mvac, zvac, Alvac, nlvac, Agvac
         
             for param,j in zip(bounds_vac.keys(),range(len(bounds_vac.keys()))):
                 if check_prior(vacparams[j],bounds_vac[param]) == 1: #if the source parameters hits the upper limit
@@ -1083,7 +1058,7 @@ class Hierarchical:
             if out_of_bounds:
                 count+=1
 
-            Ivac_i = Isource_vac(M=np.exp(vacparams[0]),z=vacparams[1], 
+            Ivac_i = Isource_vac(M=vacparams[0],z=vacparams[1], 
                                 K=K, alpha=alpha, beta=beta, #variable hyperparameters
                                 Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth)
 
@@ -1109,12 +1084,12 @@ class Hierarchical:
         #calculate source integral
         Iloc_all = []
 
-        bounds_loc = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
+        bounds_loc = {'M':self.source_bounds['M'],'z':self.source_bounds['z'],
                       'Al':self.source_bounds['Al'],'nl':self.source_bounds['nl']} #prior range
     
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
-            Fisher = Fishers_all[i] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            Fisher = Fishers_all[i] #Fisher in transformed coords [M,z,Al,nl,Ag]
             locparams = locparams_all[i]
             
             for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
@@ -1132,7 +1107,7 @@ class Hierarchical:
             if out_of_bounds:
                 count+=1
     
-            Iloc_i = Isource_loc(M=np.exp(locparams[0]),z=locparams[1], vec_l=[locparams[2],locparams[3]], 
+            Iloc_i = Isource_loc(M=locparams[0],z=locparams[1], vec_l=[locparams[2],locparams[3]], 
                                 K=K, alpha=alpha, beta=beta, 
                                 f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
                                 Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
@@ -1166,14 +1141,14 @@ class Hierarchical:
         #calculate source integral
         Iglob_all = []
 
-        bounds_glob = {'logM':np.log(self.source_bounds['M']),'z':self.source_bounds['z'],
+        bounds_glob = {'M':self.source_bounds['M'],'z':self.source_bounds['z'],
                       'Ag':self.source_bounds['Ag']} #prior range
     
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
             Fisher = Fishers_all[i] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
     
-            globparams = globparams_all[i] # logMglob, zglob, Alglob, nlglob, Agglob
+            globparams = globparams_all[i] # Mglob, zglob, Alglob, nlglob, Agglob
             
             for param,j in zip(bounds_glob.keys(),range(len(bounds_glob.keys()))):
                 if check_prior(globparams[j],bounds_glob[param]) == 1: #if the source parameters hits the upper limit
@@ -1190,7 +1165,7 @@ class Hierarchical:
             if out_of_bounds:
                 count+=1
     
-            Iglob_i = Isource_glob(M=np.exp(globparams[0]),z=globparams[1],Ag=globparams[-1],
+            Iglob_i = Isource_glob(M=globparams[0],z=globparams[1],Ag=globparams[-1],
                                   K=K, alpha=alpha, beta=beta, 
                                   Gdot=Gdot,Mstar=self.Mstar_truth,
                                   Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
@@ -1502,8 +1477,8 @@ class Hierarchical:
         Fisher_index = np.array(Fisher_index)
         SNRs = np.array(SNRs)
         
-        params = ['$\\log{M}$','$z$','$A_l$','$n_l$','$A_g$']
-        param_lims = [np.log(self.M_range),self.z_range,self.Al_range,self.nl_range,self.Ag_range]
+        params = ['$\M$','$z$','$A_l$','$n_l$','$A_g$']
+        param_lims = [self.M_range,self.z_range,self.Al_range,self.nl_range,self.Ag_range]
         fig, axs = plt.subplots(len(params),len(params),figsize=(40,40))
 
         plt.subplots_adjust(hspace=0, wspace=0)
