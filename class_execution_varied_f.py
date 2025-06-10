@@ -117,9 +117,9 @@ SNR_thresh = 20.0
 
 ### Varied parameters
 
-N_fs = 11 #grid size over the fraction of EMRIs with a local effect
+N_fs = 10 #grid size over the fraction of EMRIs with a local effect
 
-f_range = np.linspace(0.0,1.0,N_fs) #grid of fraction of EMRIs with a local effect
+f_range = np.linspace(0.1,1.0,N_fs) #grid of fraction of EMRIs with a local effect
 
 true_Gdot = 1e-9
 true_K = 5e-3
@@ -164,8 +164,8 @@ for i in range(len(f_range)):
     #setting up kwargs to pass to StableEMRIFishers class
     sef_kwargs = {'EMRI_waveform_gen':EMRI_TDI, #EMRI waveform model with TDI response
               'param_names': ['M','dist','A_l','n_l','A_g'], #params to be varied
-              'der_order':4, #derivative order
-              'Ndelta':12, #number of stable points
+              'der_order':2, #derivative order
+              'Ndelta':8, #number of stable points
               'stats_for_nerds': False, #true if you wanna print debugging info
               'stability_plot': False, #true if you wanna plot stability surfaces
               'use_gpu':use_gpu,

@@ -114,8 +114,8 @@ SNR_thresh = 20.0
 
 #true values of population hyperparameters.
 true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
-            'f':1.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-            'Gdot':0.0 #global effect hyper
+            'f':0.5,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
+            'Gdot':1e-9 #global effect hyper
            }
 
 #prior bounds on source parameters
@@ -149,17 +149,17 @@ channels = [A1TDISens, E1TDISens]
 noise_kwargs = [{"sens_fn": channel_i} for channel_i in channels]
 
 #delta_range for additional parameters (because the default ranges may not be suitable)
-Ndelta = 12
+Ndelta = 8
 delta_range = {
 "Al":np.geomspace(1e-5,1e-10,Ndelta),
 "nl":np.geomspace(1.0,1e-5,Ndelta),
-"Ag":np.geomspace(1e-8,1e-14,Ndelta),
+"Ag":np.geomspace(1e-8,1e-12,Ndelta),
 }
 
 #setting up kwargs to pass to StableEMRIFishers class
 sef_kwargs = {'EMRI_waveform_gen':EMRI_TDI, #EMRI waveform model with TDI response
               'param_names': ['m1','dist','Al','nl','Ag'], #params to be varied. m1 is alias for MBH mass in latest version of SEF. !!! DO NOT CHANGE THIS ORDER !!!
-              'der_order':4, #derivative order
+              'der_order':2, #derivative order
               'Ndelta':Ndelta, #number of stable points
               'delta_range':delta_range,#custom delta range for additional parameters
               'stats_for_nerds': True, #true if you wanna print debugging info
