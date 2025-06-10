@@ -3,7 +3,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
-import cupy as cp
+try:
+    import cupy as cp
+    use_gpu = True
+except:
+    use_gpu = False
+    
 import pickle
 import corner
 import time
@@ -28,17 +33,23 @@ from scipy.stats import uniform
 from scipy.special import factorial
 from scipy.optimize import brentq, root
 
-use_gpu = True
 from scipy.stats import multivariate_normal
 import warnings
 
-from Hierarchical_Class import Hierarchical
-from JointWave import JointKerrWaveform, JointRelKerrEccFlux
+from hierarchical.Hierarchical_Class import Hierarchical
+from hierarchical.JointWave import JointKerrWaveform, JointRelKerrEccFlux
+
+if not use_gpu:
+    cfg_set = few.get_config_setter(reset=True)
+    cfg_set.enable_backends("cpu")
+    cfg_set.set_log_level("info")
+else:
+    pass #let the backend decide for itself.
 
 T_LISA = 1. #LISA observation duration
 dt = 10.0 #sampling rate
 
-max_step_days = 50.0 #maximum step size for inspiral calculation. Smaller number ensures a more accurate trajectory but higher computation time.
+max_step_days = 10.0 #maximum step size for inspiral calculation. Smaller number ensures a more accurate trajectory but higher computation time.
 
 insp_kwargs = { "err": 1e-11, #Default: 1e-11 in FEW 2
                 "max_step_size": max_step_days*24*60*60, #in seconds
@@ -96,21 +107,21 @@ cosmo_params={'Omega_m0':0.30,'Omega_Lambda0':0.70,'H0':70e3}
 Mstar = 3e6
 
 #True size of the population
-Npop = int(5e1)
+Npop = int(1e3)
 
 #detection SNR threshold
 SNR_thresh = 20.0
 
 #true values of population hyperparameters.
 true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
-            'f':0.5,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-            'Gdot':1e-9 #global effect hyper
+            'f':1.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
+            'Gdot':0.0 #global effect hyper
            }
 
 #prior bounds on source parameters
 source_bounds={'M':[1e5,1e7],'z':[0.01,1.0], #vacuum parameters
-               'Al':[0.0,1e-4],'nl':[0.0,20.0], #local effect parameters
-               'Ag':[0.0,1e-8] #global effect parameters
+               'Al':[0.0,1e-5],'nl':[0.0,20.0], #local effect parameters
+               'Ag':[0.0,1e-9] #global effect parameters
               }
 
 #prior bounds on population hyperparameters
@@ -120,8 +131,7 @@ hyper_bounds={'K':[1e-3,1e-2],'alpha':[-0.5,0.5],'beta':[-0.5,0.5], #vacuum hype
               'sigma_nl':[true_hyper['sigma_nl']*1e-1,true_hyper['sigma_nl']*1e2],#local effect hyper
              'Gdot':source_bounds['Ag'] #global effect hyper
              }
-             
-             
+
 filename_Fishers_loc = 'Fishers_loc' #subfolder with inferred FIMs in local hypothesis
 filename_Fishers_glob = 'Fishers_glob' #subfolder with inferred FIMs in global hypothesis
 
@@ -167,6 +177,7 @@ hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef_kwargs=sef_kwargs,
                     source_bounds=source_bounds,hyper_bounds=hyper_bounds,Mstar=Mstar,
                     T_LISA=T_LISA,make_nice_plots=True,M_random=int(2e3),
                     Fisher_validation_kwargs=Fisher_validation_kwargs,
-                   out_of_bound_nature='remove')
+                   out_of_bound_nature='remove'
+                   )
 
 hier()

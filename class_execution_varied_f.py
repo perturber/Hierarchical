@@ -3,7 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
-import cupy as cp
+
+try:
+    import cupy as cp
+    use_gpu = True
+except:
+    use_gpu = False
+    
 import pickle
 import corner
 import time
@@ -13,12 +19,14 @@ from stableemrifisher.utils import inner_product, generate_PSD, padding
 
 from few.utils.utility import get_p_at_t
 from few.trajectory.inspiral import EMRIInspiral
-from few.waveform import GenerateEMRIWaveform, Joint_RelativisticKerrCircularFlux
+from few.waveform import GenerateEMRIWaveform
 from few.summation.aakwave import AAKSummation
-from few.utils.constants import YRSID_SI, C_SI
+from few.utils.constants import YRSID_SI
+from few.utils.constants import SPEED_OF_LIGHT as C_SI
 
 from fastlisaresponse import ResponseWrapper  # Response function 
 from lisatools.detector import ESAOrbits #ESAOrbits correspond to esa-trailing-orbits.h5
+from lisatools.sensitivity import get_sensitivity, A1TDISens, E1TDISens, T1TDISens
 
 from scipy.integrate import quad, nquad
 from scipy.interpolate import RegularGridInterpolator, CubicSpline
@@ -26,29 +34,36 @@ from scipy.stats import uniform
 from scipy.special import factorial
 from scipy.optimize import brentq, root
 
-use_gpu = True
 from scipy.stats import multivariate_normal
 import warnings
 
-from Hierarchical_Class import Hierarchical
+from hierarchical.Hierarchical_Class import Hierarchical
+from hierarchical.JointWave import JointKerrWaveform, JointRelKerrEccFlux
+
+if not use_gpu:
+    cfg_set = few.get_config_setter(reset=True)
+    cfg_set.enable_backends("cpu")
+    cfg_set.set_log_level("info")
+else:
+    pass #let the backend decide for itself.
+
 
 T_LISA = 1. #LISA observation duration
 dt = 10.0 #sampling rate
 
-insp_kwargs = { "err": 1e-10,
-                "DENSE_STEPPING": 0,
-                "max_init_len": int(1e8),
-               "func":"Joint_Relativistic_Kerr_Circ_Flux",
-               "use_rk4":True,
-                }
+max_step_days = 10.0 #maximum step size for inspiral calculation. Smaller number ensures a more accurate trajectory but higher computation time.
+
+insp_kwargs = { "err": 1e-11, #Default: 1e-11 in FEW 2
+                "max_step_size": max_step_days*24*60*60, #in seconds
+                "buffer_length":int(1e6), 
+               }
 
 sum_kwargs = {
-    "use_gpu": use_gpu,  # GPU is availabel for this type of summation
     "pad_output": True, # True if expecting waveforms smaller than LISA observation window.
 }
 
 Waveform_model = GenerateEMRIWaveform(
-            Joint_RelativisticKerrCircularFlux,
+            JointKerrWaveform,
             inspiral_kwargs=insp_kwargs,
             sum_kwargs=sum_kwargs,
             use_gpu=use_gpu,
@@ -95,27 +110,34 @@ cosmo_params={'Omega_m0':0.30,'Omega_Lambda0':0.70,'H0':70e3}
 Mstar = 3e6
 
 #True size of the population
-Npop = int(1e2) #INCREASE TO 1e3 LATER?
+Npop = int(3e2) #INCREASE TO 1e3 LATER?
 
 #detection SNR threshold
 SNR_thresh = 20.0
 
 ### Varied parameters
 
-filename = f'Hierarchical_Npop_{Npop}_varied_f' #folder with all the analysis data and plots
-
-N_fs = 10 #grid size over the fraction of EMRIs with a local effect
+N_fs = 11 #grid size over the fraction of EMRIs with a local effect
 
 f_range = np.linspace(0.0,1.0,N_fs) #grid of fraction of EMRIs with a local effect
+
+true_Gdot = 1e-9
+true_K = 5e-3
+true_alpha = 0.2
+true_beta = 0.2
+
+parent_filename = f'Hierarchical_Npop_{Npop}_varied_f_Gdot_{true_Gdot}_K_{true_K}_alpha_{true_alpha}_beta_{true_beta}'
+
+os.makedirs(parent_filename, exist_ok=True)
 
 for i in range(len(f_range)):
 
     f = f_range[i]
     
     #true values of population hyperparameters.
-    true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
+    true_hyper={'K':true_K,'alpha':true_alpha,'beta':true_beta, #vacuum hyperparameters
                 'f':f,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-                'Gdot':1e-9 #global effect hyper
+                'Gdot':true_Gdot #global effect hyper
                }
 
     #prior bounds on source parameters
@@ -132,35 +154,34 @@ for i in range(len(f_range)):
                  'Gdot':source_bounds['Ag'] #global effect hyper
                  }
 
-    filename_Fishers_loc = f'Fishers_loc_f_{f}' #subfolder with inferred FIMs in local hypothesis
-    filename_Fishers_glob = f'Fishers_glob_f_{f}' #subfolder with inferred FIMs in global hypothesis
+    filename = parent_filename + f'/f_{true_hyper['f']}' #folder with all the analysis data and plots
+    filename_Fishers = 'Fishers' #subfolder with all the Fisher matrices
+    plots_filename = 'fancy_plots' #subfolder where all the plots will be saved
     
-    Fisher_validation_kwargs = {'filename_Fishers_loc':filename_Fishers_loc,
-                                'filename_Fishers_glob':filename_Fishers_glob,
-                                'validate':True, #whether to calculate Fishers at the biased-inference point
-                                'KL_threshold':1.0 #threshold for Fisher validation; only Fishers below this threshold will be considered valid under LSA.
-                               }
+    filename_Fishers_loc = 'Fishers_loc' #subfolder with inferred FIMs in local hypothesis
+    filename_Fishers_glob = 'Fishers_glob' #subfolder with inferred FIMs in global hypothesis
     
-    filename_Fishers = f'Fishers_f_{f}' #subfolder with all the Fisher matrices
-    plots_filename = f'fancy_plots_f_{f}' #subfolder where all the plots will be saved
-
     #setting up kwargs to pass to StableEMRIFishers class
     sef_kwargs = {'EMRI_waveform_gen':EMRI_TDI, #EMRI waveform model with TDI response
-                  'param_names': ['M','dist','A_l','n_l','A_g'], #params to be varied
-                  'der_order':4, #derivative order
-                  'Ndelta':12, #number of stable points
-                  'stats_for_nerds': False, #true if you wanna print debugging info
-                  'stability_plot': False, #true if you wanna plot stability surfaces
-                  'use_gpu':use_gpu,
-                  #'filename': filename_Fishers, #filename will be added inside the class definition
-                  #'suffix':i #suffix for ith EMRI source will be added inside class definition
-                  'interpolation_factor':1}
+              'param_names': ['M','dist','A_l','n_l','A_g'], #params to be varied
+              'der_order':4, #derivative order
+              'Ndelta':12, #number of stable points
+              'stats_for_nerds': False, #true if you wanna print debugging info
+              'stability_plot': False, #true if you wanna plot stability surfaces
+              'use_gpu':use_gpu,
+              'plunge_check':False, #no need to check for plunge --- away from plunge already ensured.
+              'noise_model': get_sensitivity,
+              'channels':channels,
+              'noise_kwargs':noise_kwargs,
+             }
     
     hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef_kwargs=sef_kwargs,
                         filename=filename,filename_Fishers=filename_Fishers,
                         cosmo_params=cosmo_params,true_hyper=true_hyper,
                         source_bounds=source_bounds,hyper_bounds=hyper_bounds,Mstar=Mstar,
                         T_LISA=T_LISA,make_nice_plots=True,plots_filename=plots_filename,
-                        M_random=int(2e3),Fisher_validation_kwargs=Fisher_validation_kwargs)
+                        M_random=int(2e3),
+                        #Fisher_validation_kwargs=Fisher_validation_kwargs
+                        )
     
     hier()
