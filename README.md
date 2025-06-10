@@ -5,9 +5,9 @@ Decoupling local and global Beyond vacuum-GR effects in EMRIs with hierarchical 
 
 Dependencies:
 - [`FastEMRIWaveforms(FEW)v2.0`](https://github.com/znasipak/FastEMRIWaveforms-Soton-Hackathon-2025/tree/Kerr_Equatorial_Eccentric). This branch is fully compatible with the default version, although [this](https://github.com/znasipak/FastEMRIWaveforms-Soton-Hackathon-2025/issues/55) issue needs fixing.
-- [`StableEMRIFisher(SEF)`](https://github.com/perturber/StableEMRIFisher/tree/few2_package). This branch is fully compatible with the default version.
-- [`LISAanalysistools(LAT)`](https://github.com/mikekatz04/LISAanalysistools/tree/main).
-- [`lisa-on-gpu`](https://github.com/mikekatz04/lisa-on-gpu/tree/master).
+- [`StableEMRIFisher(SEF)`](https://github.com/perturber/StableEMRIFisher/tree/few2_package). This branch is fully compatible with the default version of the few2_package branch.
+- [`LISAanalysistools(LAT)`](https://github.com/mikekatz04/LISAanalysistools/tree/main). LISA response util.
+- [`lisa-on-gpu`](https://github.com/mikekatz04/lisa-on-gpu/tree/master). LISA response util.
 
 Download the zip file and unzip contents. Here's a brief description of the different files:
 
