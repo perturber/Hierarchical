@@ -772,14 +772,12 @@ class Hierarchical:
 
             if (np.linalg.eigvals(Fisher_transformed) < 0.0).any():
                 warnings.warn("positive-semi-definiteness check failed for index: ", index)
-                warnings.warn(f"removing source {index}...")
-                self.detected_EMRIs = np.delete(self.detected_EMRIs, i)
+                #warnings.warn(f"removing source {index}...")
+                #self.detected_EMRIs = np.delete(self.detected_EMRIs, i)
                 
-            else:    
-                print("positive-definiteness check passed for index: ", index, ". Saving Fisher...")
-                with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
-                    if not "Fisher_transformed" in f:
-                        f.create_dataset("Fisher_transformed", data = Fisher_transformed)
+            with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
+                if not "Fisher_transformed" in f:
+                    f.create_dataset("Fisher_transformed", data = Fisher_transformed)
                 
         np.save(f"{self.filename}/detected_EMRIs",self.detected_EMRIs) #save updated list with check on positive-definiteness of Fisher_transformed
 
