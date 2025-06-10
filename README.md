@@ -11,10 +11,10 @@ Dependencies:
 
 Download the zip file and unzip contents. Here's a brief description of the different files:
 
-- `Hierarchical_Class.py`: the main script file hosting the Hierarchical class. Given a cosmology/EMRI parametrization setup, this script calculates (i) the Fisher matrices at the true parameter point, (ii) the biased-inference points in the vacuum, local-only, and global-only hypotheses, and (iii) Bayes factors comparing the three hypothesis.
-- `FisherValidation.py`: script file that can validate Fishers calculated at the true parameter point and the biased-inference point using KL-divergence. If KL is above a given threshold, the Fishers at the two points are assumed to be 'too different', breaking the linear-signal approximation. Validation can be performed from the Hierarchical class in Hierarchical_class.py.
-- `utility.py`: various utility functions (cosmology, analysis) used by `Hierarchical_Class.py` and `FisherValidation.py`.
-- `class_execution_HPC.py`: execution file for a single full run with the true population being vacuum-GR consistent as an example.
+- `hierarchical/Hierarchical_Class.py`: the main script file hosting the Hierarchical class. Given a cosmology/EMRI parametrization setup, this script calculates (i) the Fisher matrices at the true parameter point, (ii) the biased-inference points in the vacuum, local-only, and global-only hypotheses, and (iii) Bayes factors comparing the three hypothesis.
+- `hierarchical/FisherValidation.py`: script file that can validate Fishers calculated at the true parameter point and the biased-inference point using KL-divergence. If KL is above a given threshold, the Fishers at the two points are assumed to be 'too different', breaking the linear-signal approximation. Validation can be performed from the Hierarchical class in Hierarchical_class.py.
+- `hierarchical/utility.py`: various utility functions (cosmology, analysis) used by `Hierarchical_Class.py` and `FisherValidation.py`.
+- `class_execution_Hierarchical.py`: execution file with fixed f and Gdot in the true population (single evaluation).
 - `class-execution_varied_f.py`: execution file where the fractional EMRIs with a local effect, f, varies from 0 to 1. Gdot (global effect amplitude) is fixed to 1e-9.
 
 Access the datafiles produced in different examples [here](https://zenodo.org/records/15362412?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6IjY2N2RjZjkwLTdjYmYtNDEyMi05YjI2LWNiYTFjNTg0MzFiNSIsImRhdGEiOnt9LCJyYW5kb20iOiI0NzI1ODIxM2U1YWVlNjQ2ZTY0YjA3NjU1Njg1YTliMyJ9.FioeGIWlXePv3N0ozFbiWZOgCARcYeYx-J6y4Yy1DJ_xrVVVB5paCgbrXQBoyOj_Lpm7tl5zX-vjwelFDJkF5Q).
