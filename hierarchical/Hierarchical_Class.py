@@ -185,7 +185,7 @@ def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,
                                0.0, #e0
                                1.0, #Y0
                                Alsamps[i],
-                               nlsamps[i],
+                               8.0, #nlsamps[i],
                                Agsamps[i],
                                4.0, #ng
                               ],
@@ -1236,7 +1236,7 @@ class Hierarchical:
                     Ag = self.detected_EMRIs[i]['local_params'][4] #will be zero in local hypothesis
                     ng = 4.0
             
-                    if Fishers_loc_KL[j] < self.KL_threshold: #KL-divergence of jth source should be less than the threshold.
+                    if (Fishers_loc_KL[j] < self.KL_threshold) & (Fishers_loc_KL[j] >= 0.0): #KL-divergence of jth source should be less than the threshold. out_of_bounds sources will have KL = -1 and will also be ignored here.
                         Fishers_all_KL.append(Fishers_all[j])
                         indices_all_KL.append(indices_all[j])
                         locparams_all_KL.append(locparams_all[j])
@@ -1390,7 +1390,7 @@ class Hierarchical:
                     Ag = self.detected_EMRIs[i]['global_params'][4] 
                     ng = 4.0
             
-                    if Fishers_glob_KL[j] < self.KL_threshold: #KL-divergence of jth source should be less than the threshold.
+                    if (Fishers_glob_KL[j] < self.KL_threshold) & (Fishers_glob_KL[j] >= 0.0): #KL-divergence of jth source should be less than the threshold. out_of_bounds sources will have KL = -1 and will also be ignored here.
                         Fishers_all_KL.append(Fishers_all[j])
                         indices_all_KL.append(indices_all[j])
                         globparams_all_KL.append(globparams_all[j])

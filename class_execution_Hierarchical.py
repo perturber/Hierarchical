@@ -114,14 +114,14 @@ SNR_thresh = 20.0
 
 #true values of population hyperparameters.
 true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
-            'f':0.5,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-            'Gdot':1e-9 #global effect hyper
+            'f':0.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
+            'Gdot':0.0 #global effect hyper
            }
 
 #prior bounds on source parameters
 source_bounds={'M':[1e5,1e7],'z':[0.01,1.0], #vacuum parameters
                'Al':[0.0,1e-5],'nl':[0.0,20.0], #local effect parameters
-               'Ag':[0.0,1e-9] #global effect parameters
+               'Ag':[0.0,1e-8] #global effect parameters
               }
 
 #prior bounds on population hyperparameters

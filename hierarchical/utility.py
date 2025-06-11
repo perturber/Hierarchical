@@ -94,3 +94,16 @@ def check_prior(param,bound):
         return -1 #lower bound hit
     else:
         return 1 #upper bound hit
+    
+def out_of_bounds_allparams(params, bounds):
+    """ return False if all params within bounds, False otherwise
+        params = list or nd.array of all parameters
+        bounds = dict with names of params as keys and their bounds [lower, upper] as the values"""
+
+    out_of_bounds = False
+    
+    for param,j in zip(bounds.keys(),range(len(bounds.keys()))):
+        if np.abs(check_prior(params[j],bounds[param])) == 1: #if the source parameters hits the upper limit
+            out_of_bounds = True
+            
+    return out_of_bounds
