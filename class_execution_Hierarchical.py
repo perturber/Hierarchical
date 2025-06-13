@@ -115,13 +115,13 @@ SNR_thresh = 20.0
 #true values of population hyperparameters.
 true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
             'f':0.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-            'Gdot':0.0 #global effect hyper
+            'Gdot':1e-8 #global effect hyper
            }
 
 #prior bounds on source parameters
 source_bounds={'M':[1e5,1e7],'z':[0.01,1.0], #vacuum parameters
                'Al':[0.0,1e-5],'nl':[0.0,20.0], #local effect parameters
-               'Ag':[0.0,1e-8] #global effect parameters
+               'Ag':[0.0,1e-7] #global effect parameters
               }
 
 #prior bounds on population hyperparameters
@@ -176,8 +176,8 @@ hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef_kwargs=sef_kwargs,
                     cosmo_params=cosmo_params,true_hyper=true_hyper,
                     source_bounds=source_bounds,hyper_bounds=hyper_bounds,Mstar=Mstar,
                     T_LISA=T_LISA,make_nice_plots=True,M_random=int(2e3),
-                    Fisher_validation_kwargs=Fisher_validation_kwargs,
-                   out_of_bound_nature='remove'
+                    #Fisher_validation_kwargs=Fisher_validation_kwargs, #for validation only
+                   out_of_bound_nature='edge'
                    )
 
 hier()
