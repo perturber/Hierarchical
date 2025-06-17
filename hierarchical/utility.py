@@ -42,7 +42,7 @@ else:
 
 def H(z,H0,Omega_m0,Omega_Lambda0):
     """
-    calculate the Hubble parameter at redshift z in m/s/Gpc
+    calculate the Hubble parameter at redshift z given H0 (in the same units as H0)
     """
     return H0 * np.sqrt(Omega_m0*(1+z)**3 + Omega_Lambda0)
 
@@ -53,20 +53,20 @@ def dc(z,H0,Omega_m0,Omega_Lambda0):
     """
     returns the comoving distance in Gpc for a given redshift z
     """
-    return quad(integrand_dc,0,z,args=(H0,Omega_m0,Omega_Lambda0),epsabs=1e-1,epsrel=1e-1)[0]/1000
+    return quad(integrand_dc,0,z,args=(H0,Omega_m0,Omega_Lambda0),epsabs=1e-1,epsrel=1e-1)[0]
 
-def getdistGpc(z,H0,Omega_m0,Omega_Lambda0):
+def getdist(z,H0,Omega_m0,Omega_Lambda0):
     """
-    returns the luminosity distance in Gpc for a given redshift z
+    returns the luminosity distance for a given redshift z
     """
     return (1+z)*dc(z,H0,Omega_m0,Omega_Lambda0)
 
 def dlminusdistz(z, dl, H0,Omega_m0,Omega_Lambda0):
-    return dl - getdistGpc(z,H0,Omega_m0,Omega_Lambda0)
+    return dl - getdist(z,H0,Omega_m0,Omega_Lambda0)
 
 def getz(dl,H0,Omega_m0,Omega_Lambda0):
     """
-    returns the redshift for a given luminosity distance in Gpc
+    returns the redshift for a given luminosity distance
     """    
     return (root(dlminusdistz,x0=0.1,args=(dl,H0,Omega_m0,Omega_Lambda0)).x)[0]
     

@@ -34,7 +34,7 @@ from scipy.optimize import brentq, root
 from scipy.stats import multivariate_normal
 import warnings
 
-from hierarchical.utility import getdistGpc, Jacobian, out_of_bounds_allparams
+from hierarchical.utility import getdist, Jacobian, out_of_bounds_allparams
 
 if not use_gpu:
     cfg_set = few.get_config_setter(reset=True)
@@ -148,7 +148,7 @@ class FisherValidation:
                 e0 = detected_EMRIs[i]['true_params'][4]
                 Y0 = detected_EMRIs[i]['true_params'][5]
                 z = detected_EMRIs[i]['local_params'][1]
-                dL = getdistGpc(z,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+                dL = getdist(z,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 qS = detected_EMRIs[i]['true_params'][7]
                 phiS = detected_EMRIs[i]['true_params'][8]
                 qK = detected_EMRIs[i]['true_params'][9]
@@ -195,7 +195,7 @@ class FisherValidation:
                 e0 = detected_EMRIs[i]['true_params'][4]
                 Y0 = detected_EMRIs[i]['true_params'][5]
                 z = detected_EMRIs[i]['global_params'][1]
-                dL = getdistGpc(z,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+                dL = getdist(z,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 qS = detected_EMRIs[i]['true_params'][7]
                 phiS = detected_EMRIs[i]['true_params'][8]
                 qK = detected_EMRIs[i]['true_params'][9]
@@ -248,7 +248,7 @@ class FisherValidation:
                     
                 #transform Fishers_loc[index]
                 M_i = detected_EMRIs[i]['local_params'][0]
-                dist_i = getdistGpc(detected_EMRIs[i]['local_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+                dist_i = getdist(detected_EMRIs[i]['local_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
                 J = Jacobian(M_i, dist_i,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
@@ -276,7 +276,7 @@ class FisherValidation:
                 
                 #transform Fishers_glob[index]
                 M_i = detected_EMRIs[i]['global_params'][0]
-                dist_i = getdistGpc(detected_EMRIs[i]['global_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+                dist_i = getdist(detected_EMRIs[i]['global_params'][1],H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
                 
                 J = Jacobian(M_i, dist_i,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
 

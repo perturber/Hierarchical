@@ -104,7 +104,10 @@ EMRI_TDI = ResponseWrapper(
                         
 ### Fixed parameters
 #cosmological parameters
-cosmo_params={'Omega_m0':0.30,'Omega_Lambda0':0.70,'H0':70e3}
+cosmo_params={'Omega_m0':0.30,
+              'Omega_Lambda0':0.70,
+              'H0':70e6  #H0 in m/s/Gpc
+              }
 
 #Mstar normalization term for the EMRI MBH mass distribution
 Mstar = 3e6

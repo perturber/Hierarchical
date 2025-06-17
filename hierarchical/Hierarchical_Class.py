@@ -38,7 +38,7 @@ from scipy.stats import multivariate_normal
 import warnings
 
 from hierarchical.FisherValidation import FisherValidation
-from hierarchical.utility import H, integrand_dc, dc, getdistGpc, dlminusdistz, getz, Jacobian, check_prior
+from hierarchical.utility import H, integrand_dc, dc, getdist, dlminusdistz, getz, Jacobian, check_prior
 from hierarchical.JointWave import JointKerrWaveform, JointRelKerrEccFlux
 
 
@@ -59,9 +59,9 @@ def prior_vac(M, z, K, alpha, beta, H0, Omega_m0,Omega_Lambda0, Mstar):
     calculate the UNNORMALIZED probability distribution function of 
     obtaining the source params [M,z]
     """
-    C = K*(1/Mstar)**alpha*4*np.pi
+    C = K * ((1/Mstar)**alpha) * 4 * np.pi
 
-    return C * (M)**alpha*(1+z)**beta * dc(z,H0,Omega_m0,Omega_Lambda0)**2
+    return C * (M**alpha) * ((1+z)**beta) * (dc(z,H0,Omega_m0,Omega_Lambda0)**2)
 
 def prior_loc(vec_l, f, mu_l, sigma_l):
     """
@@ -324,28 +324,6 @@ def DMDz_prior_vac(M, z, K, alpha, beta,H0,Omega_m0,Omega_Lambda0, Mstar):
     term2 = 2 * alpha * C * M ** (-1 + alpha) * (1 + z) ** beta * dc(z,H0,Omega_m0,Omega_Lambda0) * Ddc(z,H0,Omega_m0,Omega_Lambda0)
     
     return term1 + term2
-
-#supporting function for Matrix operations
-def get_minor(matrix, i, j):
-    """Return the minor of the element at row i and column j."""
-    minor = np.delete(matrix, i, axis=0)  # Remove the i-th row
-    minor = np.delete(minor, j, axis=1)  # Remove the j-th column
-    return minor
-
-def cofactor_matrix(matrix):
-    """Compute the cofactor matrix of a square matrix."""
-    if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError("Matrix must be square.")
-    
-    n = matrix.shape[0]
-    cofactor = np.zeros((n, n))
-    
-    for i in range(n):
-        for j in range(n):
-            minor = get_minor(matrix, i, j)
-            cofactor[i, j] = ((-1) ** (i + j)) * np.linalg.det(minor)
-    
-    return cofactor
     
 #individual source integral terms in all three hypotheses
 
@@ -375,44 +353,60 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
     !! Transform Fisher from M, dl to M, z before calling this function !!
     """
 
+    vec_v = np.array([M,z])
+    vec_g = np.array([Ag])
+
     #getting the Fisher for vac+global effect parameters
-    dpsi = 3 #len(list(indices.keys())) #number of all parameters in the global effect hypothesis.
+    dpsi = len(list(indices.keys())) #number of all parameters in the global effect hypothesis.
     
     Fisher_psipsi_inds = np.ix_(list(indices.values()),list(indices.values()))
     Fisher_psipsi = Fisher[Fisher_psipsi_inds]
 
-    #inverse of Fisher_psipsi
-    Fisher_psipsi_inv = np.linalg.inv(Fisher_psipsi)
-
-    #cofactor matrix of Fisher_psipsi
-    cofactor_psipsi = cofactor_matrix(Fisher_psipsi)
-    #print('C_MAg: ',cofactor_psipsi[indices['M'],indices['Ag']])
-    #print('C_zAg: ',cofactor_psipsi[indices['z'],indices['Ag']])
-    
-    #getting the Fisher for vac-only parameters
+    #getting the different Fisher blocks
     indices_vac = {}
     for key in list(indices.keys()):
         if key in ['M','z']:
             indices_vac[key] = indices[key]
 
-    dv = 2 #len(list(indices_vac.keys()))
+    indices_glob = {}
+    for key in list(indices.keys()):
+        if key in ['Ag']:
+            indices_glob[key] = indices[key]
 
     Fisher_vac_inds = np.ix_(list(indices_vac.values()),list(indices_vac.values()))
-    Fisher_vac = Fisher[Fisher_vac_inds]
+    Fisher_vac = Fisher[Fisher_vac_inds] #vacuum elements only
 
-    Fisher_vac_inv = np.linalg.inv(Fisher_vac)
+    Fisher_glob_inds = np.ix_(list(indices_glob.values()),list(indices_glob.values()))
+    Fisher_glob = Fisher[Fisher_glob_inds]  #global effect elements only
+
+    Fisher_vacglob_inds = np.ix_(list(indices_vac.values()),list(indices_glob.values()))
+    Fisher_vacglob = Fisher[Fisher_vacglob_inds]
+
+    Fisher_globvac = Fisher_vacglob.T
+
+    dv = len(list(indices_vac.keys()))
+
+    v_dagger = vec_v + (np.linalg.inv(Fisher_vac) @ Fisher_vacglob) @ (vec_g - Gdot) #biased point after marginalizing over Al, nl
+    M_dagger, z_dagger = v_dagger 
+
+    #print(M, M_dagger, z, z_dagger)
 
     #actually calculating the source integral
-    Constant = ((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) #first term
+    I0 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) * 
+          np.exp(-1/2 * (Fisher_glob - (Fisher_globvac @ np.linalg.inv(Fisher_vac)) @ Fisher_vacglob) * (vec_g - Gdot)**2 )
+     ) #first term
 
-    Expterm = np.exp(-1/2 * np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac) * (Ag-Gdot)**2) #second term
+    def conditional_expectation(first_index, second_index):
+        #calculate the conditional expectation on v^k * v^m moment of the vacuum vector for I1
+        return np.linalg.inv(Fisher_vac)[first_index, second_index]
 
-    pvacterm = (prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + ((1/np.linalg.det(Fisher_vac)**2)*\
-                                                                            (1/2*DDM_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*(Fisher_psipsi[0,0]+cofactor_psipsi[indices['M'],indices['Ag']]**2*(Ag-Gdot)**2)
-                                                                      + 1/2*DDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*(Fisher_psipsi[1,1]+cofactor_psipsi[indices['z'],indices['Ag']]**2*(Ag-Gdot)**2)
-                                                                      + DMDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*(-Fisher_psipsi[0,1]+cofactor_psipsi[indices['z'],indices['Ag']]*cofactor_psipsi[indices['M'],indices['Ag']]*(Ag-Gdot)**2))))
-
-    return_val = Constant*Expterm*pvacterm
+    return_val = (I0 * 
+                  (prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) +  
+                    1/2*DDM_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['M'])
+                    + 1/2*DDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['z'],indices['z'])
+                    + DMDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['z'])
+                    )
+    )[0]
 
     if return_val < 1e-50: #underfloat handling
         return 1e-50
@@ -430,10 +424,11 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
 
     sigma_l = np.array(sigma_l)
     mu_l = np.array(mu_l)
-    vec_l = np.array(vec_l)
-    
+    vec_l = np.array(vec_l) #lhat
+
     Al, nl = vec_l
-    
+    vec_v = np.array([M,z])
+
     #getting the Fisher for vac+local effect parameters
     dpsi = len(list(indices.keys()))
     
@@ -460,37 +455,74 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     Fisher_loc_inds = np.ix_(list(indices_loc.values()),list(indices_loc.values()))
     Fisher_loc = Fisher[Fisher_loc_inds]  #local effect elements only
 
-    ### calculating the standardization factor in product of multivariate Gaussians
-    #Fisher_tilde = Fisher_psipsi + [[0,0],[0,Fisher_l]]
+    Fisher_vacloc_inds = np.ix_(list(indices_vac.values()),list(indices_loc.values()))
+    Fisher_vacloc = Fisher[Fisher_vacloc_inds]
+
+    Fisher_locvac = Fisher_vacloc.T
+
+    ### Calculating the first source term
+
+    v_dagger = vec_v + (np.linalg.inv(Fisher_vac) @ Fisher_vacloc) @ vec_l #biased point after marginalizing over Al, nl
+    M_dagger, z_dagger = v_dagger 
+
+    I0_1 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) * 
+            np.exp(-1/2 * vec_l.T @ (Fisher_loc - (Fisher_locvac @ np.linalg.inv(Fisher_vac)) @ Fisher_vacloc) @ vec_l)) #marginalization term
+    
+    def conditional_expectation(first_index, second_index):
+        #calculate the conditional expectation on v^k * v^m moment of the vacuum vector for I1
+        return np.linalg.inv(Fisher_vac)[first_index, second_index]
+    
+    I1 = ((1-f) * 
+          I0_1 * 
+          (
+          prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + 
+          (1/2*DDM_prior_vac(M=M_dagger, z=z_dagger,  K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['M']) +
+            1/2*DDz_prior_vac(M=M_dagger, z=z_dagger,  K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['z'],indices['z']) +
+            DMDz_prior_vac(M=M_dagger, z=z_dagger,  K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['z']))
+            )
+          )
+
+    #print(I0_1, I1)
+
+    ### calculating the second source term
+
+    #projection matrix: vec_l = np.dot(P,psi)
+    P = np.zeros((dl,dpsi))
+
+    for i, key in enumerate(list(indices_loc.keys())):
+        j = indices_loc[key]  # column index in full vector
+        P[i, j] = 1.0
     
     Fisher_l = np.diag(1/sigma_l**2)
 
-    Fisher_tilde_additional = np.zeros_like(Fisher_psipsi)
-    Fisher_tilde_additional[dl:,dl:] = Fisher_l
-
-    Fisher_tilde = Fisher_psipsi + Fisher_tilde_additional #Fisher_tilde
-
-    #psitilde
-    psi_tilde_additional = np.zeros(dpsi)
-    psi_tilde_additional[dl:] = Fisher_l@mu_l
-
-    psi_vec = np.array([M,z,Al,nl])
-                
-    psi_tilde = np.linalg.inv(Fisher_tilde)@(Fisher_psipsi@psi_vec  + psi_tilde_additional) #psi_tilde
+    vec_psi = np.array([M,z,Al,nl])            
     
-    M_tilde, z_tilde = psi_tilde[:dv] #v_tilde for I2 evaluation
-    
+    #print(P)
+
     #standardization factor
-    S = np.linalg.det(Fisher_loc+Fisher_l)**(1/2)/((2*np.pi)**(dpsi/2))*np.exp(-1/2*(vec_l - mu_l)@(Fisher_loc+Fisher_l)@(vec_l - mu_l))
+    S_covar = P @ np.linalg.inv(Fisher_psipsi) @ P.T + np.linalg.inv(Fisher_l)
+    S_gamma = np.linalg.inv(S_covar)
+    S = ((np.linalg.det(S_gamma)**(1/2))/((2*np.pi)**(dl/2)) * 
+         np.exp(-0.5 * (mu_l - vec_l) @ S_gamma @ (mu_l - vec_l)))
 
-    ### Calculating the source terms
-    I1 = (1-f)*((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2))*Isource_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, Fisher=Fisher,H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)
-
-    #print(np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))
+    #tilde quantities
+    Fisher_tilde = Fisher_psipsi + P.T @ Fisher_l @ P
+    mu_tilde = np.linalg.inv(Fisher_tilde) @ (Fisher_psipsi @ vec_psi + P.T @ Fisher_l @ mu_l)
     
-    I2 = S*f*Isource_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, Fisher=Fisher, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)
+    M_tilde, z_tilde = mu_tilde[:2]
 
-    #print(((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)))
+    #print(M, M_tilde, z, z_tilde, mu_tilde)
+
+    I2 = (f * 
+          S * 
+          (prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + 
+           (1/2*DDM_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*np.linalg.inv(Fisher_tilde)[indices['M'],indices['M']] +
+            1/2*DDz_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*np.linalg.inv(Fisher_tilde)[indices['z'],indices['z']] +
+            DMDz_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*np.linalg.inv(Fisher_tilde)[indices['M'],indices['z']])
+            )
+        )
+
+    #print(I1, I2)
     
     return I1 + I2
         
@@ -854,7 +886,7 @@ class Hierarchical:
                 a = self.a_truth_samples[i]
                 e0 = 0.0
                 Y0 = 1.0
-                dL = getdistGpc(self.z_truth_samples[i],self.H0,self.Omega_m0,self.Omega_Lambda0) #Gpc
+                dL = getdist(self.z_truth_samples[i],self.H0,self.Omega_m0,self.Omega_Lambda0) #Gpc
                 
                 qS = self.qS_truth_samples[i]
                 phiS = self.phiS_truth_samples[i]
