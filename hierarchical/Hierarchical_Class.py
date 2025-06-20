@@ -38,7 +38,7 @@ from scipy.stats import multivariate_normal
 import warnings
 
 from hierarchical.FisherValidation import FisherValidation
-from hierarchical.utility import H, integrand_dc, dc, getdist, dlminusdistz, getz, Jacobian, check_prior
+from hierarchical.utility import H, integrand_dc, dc, getdist, dlminusdistz, getz, Jacobian, check_prior, fishinv
 from hierarchical.JointWave import JointKerrWaveform, JointRelKerrEccFlux
 
 
@@ -214,7 +214,7 @@ def bias(psi_signal,phi_signal,multiplicative_factor):
         
     #print(delta_phi)
     
-    delta_psi = multiplicative_factor@delta_phi # Npsi x Nphi array times Nphi 1D array: 1D array of length Npsi
+    delta_psi = multiplicative_factor @ delta_phi # Npsi x Nphi array times Nphi 1D array: 1D array of length Npsi
     
     #print(psi_ML)
 
@@ -338,7 +338,7 @@ def Isource_vac(M, z, K, alpha, beta, Fisher, H0,Omega_m0,Omega_Lambda0,Mstar, i
     Fisher_vac_inds = np.ix_(list(indices.values()),list(indices.values()))
     Fisher_vac = Fisher[Fisher_vac_inds]
     
-    Fisher_vac_inv = np.linalg.inv(Fisher_vac)
+    Fisher_vac_inv = fishinv(M, Fisher_vac)
 
     return (prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + (1/2*DDM_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['M'],indices['M']] +
                                                 1/2*DDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['z'],indices['z']] +
@@ -375,6 +375,7 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
 
     Fisher_vac_inds = np.ix_(list(indices_vac.values()),list(indices_vac.values()))
     Fisher_vac = Fisher[Fisher_vac_inds] #vacuum elements only
+    Fisher_vac_inv = fishinv(M, Fisher_vac)
 
     Fisher_glob_inds = np.ix_(list(indices_glob.values()),list(indices_glob.values()))
     Fisher_glob = Fisher[Fisher_glob_inds]  #global effect elements only
@@ -386,19 +387,19 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
 
     dv = len(list(indices_vac.keys()))
 
-    v_dagger = vec_v + (np.linalg.inv(Fisher_vac) @ Fisher_vacglob) @ (vec_g - Gdot) #biased point after marginalizing over Al, nl
+    v_dagger = vec_v + (Fisher_vac_inv @ Fisher_vacglob) @ (vec_g - Gdot) #biased point after marginalizing over Al, nl
     M_dagger, z_dagger = v_dagger 
 
     #print(M, M_dagger, z, z_dagger)
 
     #actually calculating the source integral
     I0 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) * 
-          np.exp(-1/2 * (Fisher_glob - (Fisher_globvac @ np.linalg.inv(Fisher_vac)) @ Fisher_vacglob) * (vec_g - Gdot)**2 )
+          np.exp(-1/2 * (Fisher_glob - (Fisher_globvac @ Fisher_vac_inv) @ Fisher_vacglob) * (vec_g - Gdot)**2 )
      ) #first term
 
     def conditional_expectation(first_index, second_index):
         #calculate the conditional expectation on v^k * v^m moment of the vacuum vector for I1
-        return np.linalg.inv(Fisher_vac)[first_index, second_index]
+        return Fisher_vac_inv[first_index, second_index]
 
     return_val = (I0 * 
                   (prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) +  
@@ -406,7 +407,7 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
                     + 1/2*DDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['z'],indices['z'])
                     + DMDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['z'])
                     )
-    )[0]
+    )[0][0]
 
     if return_val < 1e-50: #underfloat handling
         return 1e-50
@@ -448,9 +449,11 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     
     Fisher_psipsi_inds = np.ix_(list(indices.values()),list(indices.values()))
     Fisher_psipsi = Fisher[Fisher_psipsi_inds] #Full Fisher in vac+local
+    Fisher_psipsi_inv = fishinv(M, Fisher_psipsi)
 
     Fisher_vac_inds = np.ix_(list(indices_vac.values()),list(indices_vac.values()))
     Fisher_vac = Fisher[Fisher_vac_inds] #vacuum elements only
+    Fisher_vac_inv = fishinv(M, Fisher_vac)
 
     Fisher_loc_inds = np.ix_(list(indices_loc.values()),list(indices_loc.values()))
     Fisher_loc = Fisher[Fisher_loc_inds]  #local effect elements only
@@ -462,15 +465,15 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
 
     ### Calculating the first source term
 
-    v_dagger = vec_v + (np.linalg.inv(Fisher_vac) @ Fisher_vacloc) @ vec_l #biased point after marginalizing over Al, nl
+    v_dagger = vec_v + (Fisher_vac_inv @ Fisher_vacloc) @ vec_l #biased point after marginalizing over Al, nl
     M_dagger, z_dagger = v_dagger 
 
     I0_1 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) * 
-            np.exp(-1/2 * vec_l.T @ (Fisher_loc - (Fisher_locvac @ np.linalg.inv(Fisher_vac)) @ Fisher_vacloc) @ vec_l)) #marginalization term
+            np.exp(-1/2 * vec_l.T @ (Fisher_loc - (Fisher_locvac @ Fisher_vac_inv) @ Fisher_vacloc) @ vec_l)) #marginalization term
     
     def conditional_expectation(first_index, second_index):
         #calculate the conditional expectation on v^k * v^m moment of the vacuum vector for I1
-        return np.linalg.inv(Fisher_vac)[first_index, second_index]
+        return Fisher_vac_inv[first_index, second_index]
     
     I1 = ((1-f) * 
           I0_1 * 
@@ -500,7 +503,7 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     #print(P)
 
     #standardization factor
-    S_covar = P @ np.linalg.inv(Fisher_psipsi) @ P.T + np.linalg.inv(Fisher_l)
+    S_covar = P @ Fisher_psipsi_inv @ P.T + np.linalg.inv(Fisher_l)
     S_gamma = np.linalg.inv(S_covar)
     S = ((np.linalg.det(S_gamma)**(1/2))/((2*np.pi)**(dl/2)) * 
          np.exp(-0.5 * (mu_l - vec_l) @ S_gamma @ (mu_l - vec_l)))
@@ -802,10 +805,10 @@ class Hierarchical:
             
             Fisher_transformed = J.T@Gamma_i@J #Fisher transformed now [M, z, ...]
 
-            if (np.linalg.eigvals(Fisher_transformed) < 0.0).any():
-                warnings.warn("positive-semi-definiteness check failed for index: ", index)
-                #warnings.warn(f"removing source {index}...")
-                #self.detected_EMRIs = np.delete(self.detected_EMRIs, i)
+            Fisher_inv = fishinv(M_i, Fisher_transformed)
+
+            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+                warnings.warn(f"positive-semi-definiteness check failed for index: {index}")
                 
             with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "a") as f:
                 if not "Fisher_transformed" in f:
@@ -929,7 +932,7 @@ class Hierarchical:
                                                'transformed_params':np.array(transformed_params)})
                     try:
                         with h5py.File(f"{self.filename_Fishers}/Fisher_{i}.h5", "r") as f:
-                            Gamma_i = f["Fisher"][:]
+                            _ = f["Fisher"][:]
                     except FileNotFoundError:
                         sef() #calculate and save the FIM for the detected EMRI
     
@@ -979,7 +982,7 @@ class Hierarchical:
                 i_psiphi = np.ix_(indices_psi,indices_phi)
                 i_phiphi = np.ix_(indices_phi,indices_phi) 
                 
-                Gamma_i_psipsi_inv = np.linalg.inv(Gamma_i[i_psipsi]) # Npsi x Npsi array
+                Gamma_i_psipsi_inv = fishinv(self.detected_EMRIs[i]['true_params'][0], Gamma_i[i_psipsi]) # Npsi x Npsi array
                 Gamma_i_psiphi = Gamma_i[i_psiphi] # Npsi x Nphi array
             
                 multiplicative_factor = Gamma_i_psipsi_inv@Gamma_i_psiphi # Npsi x Nphi array
@@ -1001,7 +1004,7 @@ class Hierarchical:
                 i_psiphi = np.ix_(indices_psi,indices_phi)
                 i_phiphi = np.ix_(indices_phi,indices_phi) 
                 
-                Gamma_i_psipsi_inv = np.linalg.inv(Gamma_i[i_psipsi]) # Npsi x Npsi array
+                Gamma_i_psipsi_inv = fishinv(self.detected_EMRIs[i]['true_params'][0], Gamma_i[i_psipsi]) # Npsi x Npsi array
                 Gamma_i_psiphi = Gamma_i[i_psiphi] # Npsi x Nphi array
             
                 multiplicative_factor = Gamma_i_psipsi_inv@Gamma_i_psiphi # Npsi x Nphi array
@@ -1031,7 +1034,7 @@ class Hierarchical:
                 i_psiphi = np.ix_(indices_psi,indices_phi)
                 i_phiphi = np.ix_(indices_phi,indices_phi) 
     
-                Gamma_i_psipsi_inv = np.linalg.inv(Gamma_i[i_psipsi]) # Npsi x Npsi array
+                Gamma_i_psipsi_inv = fishinv(self.detected_EMRIs[i]['true_params'][0], Gamma_i[i_psipsi]) # Npsi x Npsi array
                 Gamma_i_psiphi = Gamma_i[i_psiphi] # Npsi x Nphi array
     
                 multiplicative_factor = Gamma_i_psipsi_inv@Gamma_i_psiphi # Npsi x Nphi array
@@ -1070,6 +1073,13 @@ class Hierarchical:
             index = int(self.detected_EMRIs[i]["index"])
             with h5py.File(f"{self.filename_Fishers}/Fisher_{index}.h5", "r") as f:
                 Fisher = f["Fisher_transformed"][:] #Fisher in transformed coords [M,z,Al,nl,Ag]
+
+            M_i = self.detected_EMRIs[i]['true_params'][0]
+            Fisher_inv = fishinv(M_i, Fisher)
+
+            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+                Nobs -= 1
+                continue #skip invalid Fishers.
             
             vacparams = self.detected_EMRIs[i]["vacuum_params"] # Mvac, zvac, Alvac, nlvac, Agvac
         
@@ -1120,6 +1130,14 @@ class Hierarchical:
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
             Fisher = Fishers_all[i] #Fisher in transformed coords [M,z,Al,nl,Ag]
+
+            M_i = self.detected_EMRIs[i]['true_params'][0]
+            Fisher_inv = fishinv(M_i, Fisher)
+
+            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+                Nobs -= 1
+                continue #skip invalid Fishers.
+
             locparams = locparams_all[i]
             
             for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
@@ -1176,7 +1194,14 @@ class Hierarchical:
     
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
-            Fisher = Fishers_all[i] #Fisher in transformed coords [lnM,z,Al,nl,Ag]
+            Fisher = Fishers_all[i] #Fisher in transformed coords [M,z,Al,nl,Ag]
+
+            M_i = self.detected_EMRIs[i]['true_params'][0]
+            Fisher_inv = fishinv(M_i, Fisher)
+
+            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+                Nobs -= 1
+                continue #skip invalid Fishers.
     
             globparams = globparams_all[i] # Mglob, zglob, Alglob, nlglob, Agglob
             
@@ -1212,6 +1237,7 @@ class Hierarchical:
                 Iglob_all.append(Iglob_i)
 
         lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
+        
         if count > 0.0:
             warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
 

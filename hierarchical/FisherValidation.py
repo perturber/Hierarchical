@@ -34,7 +34,7 @@ from scipy.optimize import brentq, root
 from scipy.stats import multivariate_normal
 import warnings
 
-from hierarchical.utility import getdist, Jacobian, out_of_bounds_allparams
+from hierarchical.utility import getdist, Jacobian, out_of_bounds_allparams, fishinv
 
 if not use_gpu:
     cfg_set = few.get_config_setter(reset=True)
@@ -43,20 +43,21 @@ if not use_gpu:
 else:
     pass #let the backend decide for itself.
 
-
 #calculate the KL-divergence
-def Fisher_KL(Gamma1, Gamma2):
+def Fisher_KL(M, Gamma1, Gamma2, index_of_M = 0):
     """
     calculate the KL divergence between two Fisher matrices Gamma1 and Gamma2 of the same dimensions assuming they are
     calculated at the same parameter point.
     Since KL divergence is not symmetric, we asuume Gamma1 to be the 'truth' and Gamma2 as the 'approximation'.
     """
-    Sigma1_det = 1/np.linalg.det(Gamma1)
-    Sigma2_det = 1/np.linalg.det(Gamma2)
+    Sigma1_det = np.linalg.det(Gamma1)
+    Sigma2_det = np.linalg.det(Gamma2)
+
+    Gamma1_inv = fishinv(M, Gamma1, index_of_M)
 
     dim = len(Gamma1)
 
-    return 0.5*(np.log(Sigma2_det/Sigma1_det) - dim + np.trace(Gamma2@np.linalg.inv(Gamma1)))
+    return 0.5*(np.log(Sigma1_det/Sigma2_det) - dim + np.trace(Gamma2 @ Gamma1_inv))
 
 class FisherValidation:
 
@@ -182,7 +183,12 @@ class FisherValidation:
                     self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
             
                     sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
-                    sef()
+
+                    try:
+                        with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                            _ = f["Fisher"][:]
+                    except FileNotFoundError:
+                        sef() #calculate and save the FIM
     
         #calculate Fishers at the biased point in the global hypothesis
         if self.true_hyper['Gdot'] > 0.0:
@@ -231,7 +237,12 @@ class FisherValidation:
                     self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
             
                     sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
-                    sef()
+
+                    try:
+                        with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
+                            _ = f["Fisher"][:]
+                    except FileNotFoundError:
+                        sef() #calculate and save the FIM
 
     def transform_Fisher_at_bias(self):
 
@@ -316,8 +327,8 @@ class FisherValidation:
                     
                     with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
                         Gamma2 = f["Fisher_transformed"][:] #Fisher at injection
-        
-                    KL_loc.append(Fisher_KL(Gamma1,Gamma2))
+
+                    KL_loc.append(Fisher_KL(M, Gamma1, Gamma2, index_of_M=0))
 
                 else:
                     KL_loc.append(-1)
@@ -344,7 +355,7 @@ class FisherValidation:
                     with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
                         Gamma2 = f["Fisher_transformed"][:] #Fisher at injection
             
-                    KL_glob.append(Fisher_KL(Gamma1,Gamma2))
+                    KL_glob.append(Fisher_KL(M, Gamma1, Gamma2, index_of_M=0))
 
                 else:
                     KL_glob.append(-1)

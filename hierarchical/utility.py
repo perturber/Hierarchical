@@ -83,6 +83,28 @@ def Jacobian(M,dist,H0,Omega_m0,Omega_Lambda0):
     diag = np.diag((1.0,(del_z_del_dist)**-1,1.0,1.0,1.0))
     
     return diag
+
+def fishinv(M, Fisher, index_of_M = 0):
+    """ 
+    Calculate the Fisher inverse by transforming the index of M to lnM to improve conditionality of the matrix first. 
+    ONLY WORKS WITH INPUTS THAT HAVE PARAM M AT INDEX "index_of_M"!
+    Helps with stability of Fisher inversion.
+    """
+    
+    #Jacobian for Fisher = partial old/partial new, going from M -> lnM
+    
+    J = np.eye(len(Fisher))
+    J[index_of_M,index_of_M] = M
+
+    Fisher_lnM = J.T @ Fisher @ J
+
+    Fisher_lnM_inv = np.linalg.inv(Fisher_lnM)
+
+    #Jacobian for Covariance = partial new/partial old, going from lnM -> M
+
+    Fisher_inv = J.T @ Fisher_lnM_inv @ J
+    
+    return Fisher_inv
     
 #supporting function
 def check_prior(param,bound):
