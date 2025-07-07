@@ -387,14 +387,14 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
 
     dv = len(list(indices_vac.keys()))
 
-    v_dagger = vec_v + (Fisher_vac_inv @ Fisher_vacglob) @ (vec_g - Gdot) #biased point after marginalizing over Al, nl
+    v_dagger = vec_v + (Fisher_vac_inv @ Fisher_vacglob) @ (vec_g - Gdot) #biased point after marginalizing over Ag
     M_dagger, z_dagger = v_dagger 
 
     #print(M, M_dagger, z, z_dagger)
 
     #actually calculating the source integral
-    I0 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) * 
-          np.exp(-1/2 * (Fisher_glob - (Fisher_globvac @ Fisher_vac_inv) @ Fisher_vacglob) * (vec_g - Gdot)**2 )
+    I0 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) *  
+          np.exp(-1/2 * (Fisher_glob - ((Fisher_globvac @ Fisher_vac_inv) @ Fisher_vacglob))[0][0] * (vec_g - Gdot)**2)
      ) #first term
 
     def conditional_expectation(first_index, second_index):
@@ -407,7 +407,7 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
                     + 1/2*DDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['z'],indices['z'])
                     + DMDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['z'])
                     )
-    )[0][0]
+    )[0]
 
     if return_val < 1e-50: #underfloat handling
         return 1e-50
@@ -1111,7 +1111,7 @@ class Hierarchical:
     
         warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
     
-        return factorial(Nobs-1)*np.prod(np.array(Ivac_all))
+        return np.prod(np.array(Ivac_all))
 
     def source_integral_loc(self,K,alpha,beta,f,mu_Al,mu_nl,sigma_Al,sigma_nl,Fishers_all,indices_all,locparams_all):
         
@@ -1224,7 +1224,7 @@ class Hierarchical:
                                   K=K, alpha=alpha, beta=beta, 
                                   Gdot=Gdot,Mstar=self.Mstar_truth,
                                   Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
-            
+                                    
             if out_of_bounds and self.out_of_bound_nature == 'remove':
                 Iglob_all.append(1.0)
                 Nobs -= 1
@@ -1237,7 +1237,7 @@ class Hierarchical:
                 Iglob_all.append(Iglob_i)
 
         lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
-        
+
         if count > 0.0:
             warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
 
@@ -1335,20 +1335,26 @@ class Hierarchical:
             warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
             num_bins -= 5
             mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
-            
+        
         prior_f0 = sum(mask)/len(prodIsource) #prior number of points within the bin for f = 0 
         posterior_f0 = np.sum(prodIsource[mask])
     
         print("prior_f0: ", prior_f0)
         print("posterior_f0: ", posterior_f0)
 
+        #expectation of f:
+        expectation_f = np.sum(prodIsource * f_samples)
+        print("expectation of f: ", expectation_f)
+
+        np.savetxt(f"{self.filename}/expectation_f.txt", np.array([expectation_f]))
+
         if self.make_nice_plots:
             plt.figure(figsize=(7,5))
             plt.scatter(f_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
             plt.scatter(f_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.f_truth,color='k',linestyle='--',label='truth')
-            plt.xlabel("fraction of local-effect EMRIs (f)", fontsize=16)
-            plt.ylabel("posterior pdf p(f|data)",fontsize=16)
+            plt.xlabel(r"$f$", fontsize=16)
+            plt.ylabel(r"$p(f|\mathcal{D})$",fontsize=16)
             plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_f.png",dpi=300,bbox_inches='tight')
@@ -1358,8 +1364,8 @@ class Hierarchical:
             plt.scatter(mu_Al_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
             plt.scatter(mu_Al_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.mu_Al_truth,color='k',linestyle='--',label='truth')
-            plt.xlabel(r"mean disk-effect amplitude of local-effect EMRIs ($\mu_{Al}$)", fontsize=16)
-            plt.ylabel(r"posterior pdf p($\mu_{Al}$|data)",fontsize=16)
+            plt.xlabel(r"$\mu_{Al}$", fontsize=16)
+            plt.ylabel(r"$p(\mu_{Al}|\mathcal{D})$",fontsize=16)
             plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_muAl.png",dpi=300,bbox_inches='tight')
@@ -1369,8 +1375,8 @@ class Hierarchical:
             plt.scatter(mu_nl_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
             plt.scatter(mu_nl_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.mu_nl_truth,color='k',linestyle='--',label='truth')
-            plt.xlabel(r"mean disk-effect slope of local-effect EMRIs ($\mu_{nl}$)", fontsize=16)
-            plt.ylabel(r"posterior pdf p($\mu_{nl}$|data)",fontsize=16)
+            plt.xlabel(r"$\mu_{nl}$", fontsize=16)
+            plt.ylabel(r"$p(\mu_{nl}|\mathcal{D})$",fontsize=16)
             plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_munl.png",dpi=300,bbox_inches='tight')
@@ -1380,8 +1386,8 @@ class Hierarchical:
             plt.scatter(sigma_Al_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
             plt.scatter(sigma_Al_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.sigma_Al_truth,color='k',linestyle='--',label='truth')
-            plt.xlabel(r"std of disk-effect amplitude of local-effect EMRIs ($\sigma_{Al}$)", fontsize=16)
-            plt.ylabel(r"posterior pdf p($\sigma_{Al}$|data)",fontsize=16)
+            plt.xlabel(r"$\sigma_{Al}$", fontsize=16)
+            plt.ylabel(r"$p(\sigma_{Al}|\mathcal{D})$",fontsize=16)
             plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_sigmaAl.png",dpi=300,bbox_inches='tight')
@@ -1391,14 +1397,14 @@ class Hierarchical:
             plt.scatter(sigma_nl_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
             plt.scatter(sigma_nl_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.sigma_nl_truth,color='k',linestyle='--',label='truth')
-            plt.xlabel(r"std of disk-effect slope of local-effect EMRIs ($\sigma_{nl}$)", fontsize=16)
-            plt.ylabel(r"posterior pdf p($\sigma_{nl}$|data)",fontsize=16)
+            plt.xlabel(r"$\sigma_{nl}$", fontsize=16)
+            plt.ylabel(r"$p(\sigma_{nl}|\mathcal{D})$",fontsize=16)
             plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_sigmanl.png",dpi=300,bbox_inches='tight')
             plt.close()
         
-        return posterior_f0/prior_f0
+        return posterior_f0 / prior_f0
     
     def savage_dickey_vacglob(self):
         #no seed ideally required for this calculation
@@ -1471,6 +1477,8 @@ class Hierarchical:
             #print(K_samples[j], alpha_samples[j], beta_samples[j], Gdot_samples[j], prodIsource_j)
     
             lnprodIsource.append(lnprodIsource_j)
+
+        #print(lnprodIsource, np.max(lnprodIsource))
     
         lnprodIsource = np.array(lnprodIsource) - np.max(lnprodIsource)
         prodIsource = np.exp(lnprodIsource)
@@ -1496,19 +1504,25 @@ class Hierarchical:
         print("prior_Gdot0: ", prior_Gdot0)
         print("posterior_Gdot0: ", posterior_Gdot0)
 
+        #expectation of Gdot:
+        expectation_Gdot = np.sum(prodIsource * Gdot_samples)
+        print("expectation of Gdot: ", expectation_Gdot)
+
+        np.savetxt(f"{self.filename}/expectation_Gdot.txt", np.array([expectation_Gdot]))
+
         if self.make_nice_plots:
             plt.figure(figsize=(7,5))
             plt.scatter(Gdot_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
             plt.scatter(Gdot_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.Gdot_truth,color='k',linestyle='--',label='truth')
-            plt.xlabel("value of global-effect (Gdot)",fontsize=16)
-            plt.ylabel("posterior pdf p(Gdot|data)",fontsize=16)
+            plt.xlabel(r"$\dot{G}$",fontsize=16)
+            plt.ylabel(r"$p(\dot{G}|\mathcal{D})$",fontsize=16)
             plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_glob.png",dpi=300,bbox_inches='tight')
             plt.close()
         
-        return posterior_Gdot0/prior_Gdot0
+        return posterior_Gdot0 / prior_Gdot0
 
     def corner_plot_biases(self):
         Fisher_index = []
