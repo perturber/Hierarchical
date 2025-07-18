@@ -117,30 +117,36 @@ SNR_thresh = 20.0
 
 #true values of population hyperparameters.
 true_hyper={'K':5e-3,'alpha':0.2,'beta':0.2, #vacuum hyperparameters
-            'f':0.5,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':1.0, #local effect hyper
-            'Gdot':1e-9 #global effect hyper
+            'f':0.5,'mu_Al':1e-6,'mu_nl':8.0,'sigma_Al':1e-7,'sigma_nl':1.0, #local effect hyper
+            'Gdot':1e-13 #global effect hyper
            }
 
-#prior bounds on source parameters
-source_bounds={'M':[1e5,1e7],'z':[0.01,1.0], #vacuum parameters
+#prior bounds on source parameters. The true population would also be generated from this!
+source_bounds={'M':[1e5,1e6],'z':[0.01,1.0], #vacuum parameters
                'Al':[0.0,1e-5],'nl':[0.0,20.0], #local effect parameters
-               'Ag':[0.0,1e-8] #global effect parameters
+               'Ag':[-5e-13,5e-13] #global effect parameters
               }
 
+hypint = 0.1 #percentage interval around true value to be used as hyperparam bounds
+
 #prior bounds on population hyperparameters
-hyper_bounds={'K':[1e-3,1e-2],'alpha':[-0.5,0.5],'beta':[-0.5,0.5], #vacuum hyperparameters
-             'f':[0.0,1.0],'mu_Al':[true_hyper['mu_Al']*0.9,true_hyper['mu_Al']*1.1],'mu_nl':[true_hyper['mu_nl']*0.9,true_hyper['mu_nl']*1.1],
-              'sigma_Al':[true_hyper['sigma_Al']*1e-1,true_hyper['sigma_Al']*1e2],
-              'sigma_nl':[true_hyper['sigma_nl']*1e-1,true_hyper['sigma_nl']*1e2],#local effect hyper
-             'Gdot':source_bounds['Ag'] #global effect hyper
+hyper_bounds={'K':[true_hyper['K']*(1 - hypint),true_hyper['K']*(1 + hypint)],
+              'alpha':[true_hyper['alpha']*(1 - hypint),true_hyper['alpha']*(1 + hypint)],
+              'beta':[true_hyper['beta']*(1 - hypint),true_hyper['beta']*(1 + hypint)], #vacuum hyperparameters
+              'f':[0.0,1.0],
+              'mu_Al':[true_hyper['mu_Al']*(1 - hypint),true_hyper['mu_Al']*(1 + hypint)],
+              'mu_nl':[true_hyper['mu_nl']*(1 - hypint),true_hyper['mu_nl']*(1 + hypint)],
+              'sigma_Al':[true_hyper['sigma_Al']*(1 - hypint),true_hyper['sigma_Al']*(1 + hypint)],
+              'sigma_nl':[true_hyper['sigma_nl']*(1 - hypint),true_hyper['sigma_nl']*(1 + hypint)],#local effect hyper
+              'Gdot':source_bounds['Ag'] #global effect hyper
              }
 
 filename_Fishers_loc = 'Fishers_loc' #subfolder with inferred FIMs in local hypothesis
 filename_Fishers_glob = 'Fishers_glob' #subfolder with inferred FIMs in global hypothesis
 
 Fisher_validation_kwargs = {'filename_Fishers_loc':filename_Fishers_loc,
-                            'filename_Fishers_glob':filename_Fishers_glob,
-                            'validate':False,'KL_threshold':10.0}
+                            'filename_Fishers_glob':filename_Fishers_glob, 
+                            'validate':True,'KL_threshold':10.0} #for validation only
 
 filename = f'Hierarchical_Npop_{Npop}_f_{true_hyper['f']}_Gdot_{true_hyper['Gdot']}_K_{true_hyper['K']}_alpha_{true_hyper['alpha']}_beta_{true_hyper['beta']}' #folder with all the analysis data and plots
 #filename = f'Hierarchical_Npop_{Npop}_varied_f_Gdot_{true_hyper['Gdot']}_K_{true_hyper['K']}_alpha_{true_hyper['alpha']}_beta_{true_hyper['beta']}/f_{true_hyper['f']}' #folder with all the analysis data and plots
@@ -152,21 +158,21 @@ channels = [A1TDISens, E1TDISens]
 noise_kwargs = [{"sens_fn": channel_i} for channel_i in channels]
 
 #delta_range for additional parameters (because the default ranges may not be suitable)
-Ndelta = 8
+Ndelta = 12
 delta_range = {
-"Al":np.geomspace(1e-5,1e-10,Ndelta),
+"Al":np.geomspace(1e-7,1e-12,Ndelta),
 "nl":np.geomspace(1.0,1e-5,Ndelta),
-"Ag":np.geomspace(1e-8,1e-12,Ndelta),
+"Ag":np.geomspace(1e-13,1e-16,Ndelta),
 }
 
 #setting up kwargs to pass to StableEMRIFishers class
 sef_kwargs = {'EMRI_waveform_gen':EMRI_TDI, #EMRI waveform model with TDI response
               'param_names': ['m1','dist','Al','nl','Ag'], #params to be varied. m1 is alias for MBH mass in latest version of SEF. !!! DO NOT CHANGE THIS ORDER !!!
-              'der_order':2, #derivative order
+              'der_order':4, #derivative order
               'Ndelta':Ndelta, #number of stable points
               'delta_range':delta_range,#custom delta range for additional parameters
               'stats_for_nerds': True, #true if you wanna print debugging info
-              'stability_plot': False, #true if you wanna plot stability surfaces
+              'stability_plot': True, #true if you wanna plot stability surfaces
               'use_gpu':use_gpu,
               'plunge_check':False, #no need to check for plunge --- away from plunge already ensured.
               'noise_model': get_sensitivity,
@@ -178,9 +184,9 @@ hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef_kwargs=sef_kwargs,
                     filename=filename,filename_Fishers=filename_Fishers,
                     cosmo_params=cosmo_params,true_hyper=true_hyper,
                     source_bounds=source_bounds,hyper_bounds=hyper_bounds,Mstar=Mstar,
-                    T_LISA=T_LISA,make_nice_plots=True,M_random=int(2e3),
+                    T_LISA=T_LISA,make_nice_plots=True,M_random=int(5e2),
                     #Fisher_validation_kwargs=Fisher_validation_kwargs, #for validation only
-                   out_of_bound_nature='edge'
+                   out_of_bound_nature='remove'
                    )
 
 hier()

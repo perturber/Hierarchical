@@ -47,7 +47,6 @@ if not use_gpu:
 else:
     pass #let the backend decide for itself.
 
-
 T_LISA = 1. #LISA observation duration
 dt = 10.0 #sampling rate
 
@@ -112,24 +111,22 @@ cosmo_params={'Omega_m0':0.30,
 #Mstar normalization term for the EMRI MBH mass distribution
 Mstar = 3e6
 
-#True size of the population
-Npop = int(10e2) #INCREASE TO 1e3 LATER?
+#True size of the population (varied)
+N_Npops = 10
+Npop_range = np.linspace(1e2, 1e3, N_Npops)
 
 #detection SNR threshold
 SNR_thresh = 20.0
 
-### Varied parameters
+f = 0.0 #grid of fraction of EMRIs with a local effect
 
-N_fs = 11 #grid size over the fraction of EMRIs with a local effect
+true_Gdot = 0.0
 
-f_range = np.linspace(0.0,1.0,N_fs) #grid of fraction of EMRIs with a local effect
-
-true_Gdot = 1e-13
 true_K = 5e-3
 true_alpha = 0.2
 true_beta = 0.2
 
-parent_filename = f'Hierarchical_Npop_{Npop}_varied_f_fmax_{f_range[-1]}_Gdot_{true_Gdot}_K_{true_K}_alpha_{true_alpha}_beta_{true_beta}'
+parent_filename = f'Hierarchical_varied_Npop_Npopmax_{Npop_range[-1]}_Gdot_{true_Gdot}_f_{f}_K_{true_K}_alpha_{true_alpha}_beta_{true_beta}'
 
 #noise model setup
 channels = [A1TDISens, E1TDISens]
@@ -137,28 +134,29 @@ noise_kwargs = [{"sens_fn": channel_i} for channel_i in channels]
 
 #delta_range for additional parameters (because the default ranges may not be suitable)
 Ndelta = 12
-delta_range = {
-"Al":np.geomspace(1e-5,1e-10,Ndelta),
-"nl":np.geomspace(1.0,1e-5,Ndelta),
-"Ag":np.geomspace(1e-8,1e-12,Ndelta),
-}
 
 os.makedirs(parent_filename, exist_ok=True)
 
-for i in range(len(f_range)):
+for i in range(len(Npop_range)):
 
-    f = f_range[i]
+    Npop = int(Npop_range[i])
+    
+    delta_range = {
+    "Al":np.geomspace(1e-5,1e-10,Ndelta),
+    "nl":np.geomspace(1.0,1e-5,Ndelta),
+    "Ag":np.geomspace(1e-10, 1e-14, Ndelta),
+    }
     
     #true values of population hyperparameters.
     true_hyper={'K':true_K,'alpha':true_alpha,'beta':true_beta, #vacuum hyperparameters
                 'f':f,'mu_Al':1e-6,'mu_nl':8.0,'sigma_Al':1e-7,'sigma_nl':1.0, #local effect hyper
                 'Gdot':true_Gdot #global effect hyper
-               }
+            }
 
     #prior bounds on source parameters. The true population would also be generated from this!
     source_bounds={'M':[1e5,1e6],'z':[0.01,1.0], #vacuum parameters
                 'Al':[0.0,1e-5],'nl':[0.0,20.0], #local effect parameters
-                'Ag':[-5e-13,5e-13] #global effect parameters
+                'Ag':[-1e-12, 1e-12] #global effect parameters
                 }
 
     hypint = 0.1 #percentage interval around true value to be used as hyperparam bounds
@@ -175,7 +173,7 @@ for i in range(len(f_range)):
                 'Gdot':source_bounds['Ag'] #global effect hyper
                 }
 
-    filename = parent_filename + f'/f_{true_hyper['f']}' #folder with all the analysis data and plots
+    filename = parent_filename + f'/Npop_{Npop}' #folder with all the analysis data and plots
     filename_Fishers = 'Fishers' #subfolder with all the Fisher matrices
     plots_filename = 'fancy_plots' #subfolder where all the plots will be saved
     
@@ -184,18 +182,18 @@ for i in range(len(f_range)):
     
     #setting up kwargs to pass to StableEMRIFishers class
     sef_kwargs = {'EMRI_waveform_gen':EMRI_TDI, #EMRI waveform model with TDI response
-              'param_names': ['m1','dist','Al','nl','Ag'], #params to be varied
-              'der_order':4, #derivative order
-              'Ndelta':Ndelta, #number of stable points
-              'stats_for_nerds': True, #true if you wanna print debugging info
-              'stability_plot': False, #true if you wanna plot stability surfaces
-              'delta_range':delta_range,#custom delta range for additional parameters
-              'use_gpu':use_gpu,
-              'plunge_check':False, #no need to check for plunge --- away from plunge already ensured.
-              'noise_model': get_sensitivity,
-              'channels':channels,
-              'noise_kwargs':noise_kwargs,
-             }
+            'param_names': ['m1','dist','Al','nl','Ag'], #params to be varied
+            'der_order':4, #derivative order
+            'Ndelta':Ndelta, #number of stable points
+            'stats_for_nerds': True, #true if you wanna print debugging info
+            'stability_plot': False, #true if you wanna plot stability surfaces
+            'delta_range':delta_range,#custom delta range for additional parameters
+            'use_gpu':use_gpu,
+            'plunge_check':False, #no need to check for plunge --- away from plunge already ensured.
+            'noise_model': get_sensitivity,
+            'channels':channels,
+            'noise_kwargs':noise_kwargs,
+            }
     
     hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef_kwargs=sef_kwargs,
                         filename=filename,filename_Fishers=filename_Fishers,

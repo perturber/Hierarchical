@@ -344,7 +344,6 @@ def Isource_vac(M, z, K, alpha, beta, Fisher, H0,Omega_m0,Omega_Lambda0,Mstar, i
                                                 1/2*DDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['z'],indices['z']] +
                                                 DMDz_prior_vac(M=M, z=z, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*Fisher_vac_inv[indices['M'],indices['z']]))
 
-
 def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda0, Mstar, indices = {'M':0,'z':1,'Ag':-1}):
     """ Source Integral approximation in the Global effect hypothesis.
     M, z, Ag are the inferred source parameters. K, alpha, beta, Gdot are the hyperparameters.
@@ -393,7 +392,7 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
     #print(M, M_dagger, z, z_dagger)
 
     #actually calculating the source integral
-    I0 = (((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2))/((2*np.pi)**((dpsi-dv)/2)) *  
+    I0 = ((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2)/((2*np.pi)**((dpsi-dv)/2)) *  
           np.exp(-1/2 * (Fisher_glob - ((Fisher_globvac @ Fisher_vac_inv) @ Fisher_vacglob))[0][0] * (vec_g - Gdot)**2)
      ) #first term
 
@@ -409,10 +408,76 @@ def Isource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda
                     )
     )[0]
 
-    if return_val < 1e-50: #underfloat handling
-        return 1e-50
-    else:
-        return return_val
+    #if return_val < 1e-50: #underfloat handling
+    #    return 1e-50
+    #else:
+    return return_val
+
+def lnIsource_glob(M, z, Ag, K, alpha, beta, Gdot, Fisher,H0,Omega_m0,Omega_Lambda0, Mstar, indices = {'M':0,'z':1,'Ag':-1}):
+    """ Source Integral approximation in the Global effect hypothesis.
+    M, z, Ag are the inferred source parameters. K, alpha, beta, Gdot are the hyperparameters.
+    Fisher is the full Fisher matrix in the vac+loc+glob hypothesis at the true parameter point.
+    indices is a dict of indices of the global parameters [M, z, Ag] in the Fisher matrix.
+    !! Transform Fisher from M, dl to M, z before calling this function !!
+    """
+
+    vec_v = np.array([M,z])
+    vec_g = np.array([Ag])
+
+    #getting the Fisher for vac+global effect parameters
+    dpsi = len(list(indices.keys())) #number of all parameters in the global effect hypothesis.
+    
+    Fisher_psipsi_inds = np.ix_(list(indices.values()),list(indices.values()))
+    Fisher_psipsi = Fisher[Fisher_psipsi_inds]
+
+    #getting the different Fisher blocks
+    indices_vac = {}
+    for key in list(indices.keys()):
+        if key in ['M','z']:
+            indices_vac[key] = indices[key]
+
+    indices_glob = {}
+    for key in list(indices.keys()):
+        if key in ['Ag']:
+            indices_glob[key] = indices[key]
+
+    Fisher_vac_inds = np.ix_(list(indices_vac.values()),list(indices_vac.values()))
+    Fisher_vac = Fisher[Fisher_vac_inds] #vacuum elements only
+    Fisher_vac_inv = fishinv(M, Fisher_vac)
+
+    Fisher_glob_inds = np.ix_(list(indices_glob.values()),list(indices_glob.values()))
+    Fisher_glob = Fisher[Fisher_glob_inds]  #global effect elements only
+
+    Fisher_vacglob_inds = np.ix_(list(indices_vac.values()),list(indices_glob.values()))
+    Fisher_vacglob = Fisher[Fisher_vacglob_inds]
+
+    Fisher_globvac = Fisher_vacglob.T
+
+    dv = len(list(indices_vac.keys()))
+
+    v_dagger = vec_v + (Fisher_vac_inv @ Fisher_vacglob) @ (vec_g - Gdot) #biased point after marginalizing over Ag
+    M_dagger, z_dagger = v_dagger 
+
+    #print(M, M_dagger, z, z_dagger)
+
+    #actually calculating the source integral
+    lnI0 = (np.log((np.linalg.det(Fisher_psipsi)/np.linalg.det(Fisher_vac))**(1/2)) - np.log((2*np.pi)**((dpsi-dv)/2)) +  
+          (-1/2 * (Fisher_glob - ((Fisher_globvac @ Fisher_vac_inv) @ Fisher_vacglob))[0][0] * (vec_g - Gdot)**2)
+     ) #first term
+
+    def conditional_expectation(first_index, second_index):
+        #calculate the conditional expectation on v^k * v^m moment of the vacuum vector for I1
+        return Fisher_vac_inv[first_index, second_index]
+
+    return_val = (lnI0 + 
+                  np.log(prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) +  
+                    1/2*DDM_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['M'])
+                    + 1/2*DDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['z'],indices['z'])
+                    + DMDz_prior_vac(M=M_dagger, z=z_dagger, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*conditional_expectation(indices['M'],indices['z'])
+                    )
+    )[0]
+
+    return return_val
 
 def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_m0,Omega_Lambda0, Mstar, indices = {'M':0, 'z': 1, 'Al':2, 'nl':3}):
     """
@@ -510,7 +575,7 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
 
     #tilde quantities
     Fisher_tilde = Fisher_psipsi + P.T @ Fisher_l @ P
-    mu_tilde = np.linalg.inv(Fisher_tilde) @ (Fisher_psipsi @ vec_psi + P.T @ Fisher_l @ mu_l)
+    mu_tilde = fishinv(M, Fisher_tilde) @ (Fisher_psipsi @ vec_psi + P.T @ Fisher_l @ mu_l)
     
     M_tilde, z_tilde = mu_tilde[:2]
 
@@ -519,9 +584,9 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     I2 = (f * 
           S * 
           (prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar) + 
-           (1/2*DDM_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*np.linalg.inv(Fisher_tilde)[indices['M'],indices['M']] +
-            1/2*DDz_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*np.linalg.inv(Fisher_tilde)[indices['z'],indices['z']] +
-            DMDz_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*np.linalg.inv(Fisher_tilde)[indices['M'],indices['z']])
+           (1/2*DDM_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*fishinv(M, Fisher_tilde)[indices['M'],indices['M']] +
+            1/2*DDz_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*fishinv(M, Fisher_tilde)[indices['z'],indices['z']] +
+            DMDz_prior_vac(M=M_tilde, z=z_tilde, K=K, alpha=alpha, beta=beta, H0=H0, Omega_m0=Omega_m0, Omega_Lambda0=Omega_Lambda0,Mstar=Mstar)*fishinv(M, Fisher_tilde)[indices['M'],indices['z']])
             )
         )
 
@@ -1062,7 +1127,7 @@ class Hierarchical:
         #calculate source integral
         Ivac_all = []
 
-        Nobs = self.Nobs
+        Nobs = self.Nobs.copy()
         count = 0.0 #number of out of bound EMRIs
         
         bounds_vac = {'M':self.source_bounds['M'],'z':self.source_bounds['z']}
@@ -1077,7 +1142,7 @@ class Hierarchical:
             M_i = self.detected_EMRIs[i]['true_params'][0]
             Fisher_inv = fishinv(M_i, Fisher)
 
-            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+            if (np.linalg.eigvals(Fisher_inv) <= 0.0).any():
                 Nobs -= 1
                 continue #skip invalid Fishers.
             
@@ -1102,7 +1167,7 @@ class Hierarchical:
                                 K=K, alpha=alpha, beta=beta, #variable hyperparameters
                                 Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,Mstar=self.Mstar_truth)
 
-            if out_of_bounds and self.out_of_bound_nature == 'remove':
+            if out_of_bounds & self.out_of_bound_nature == 'remove':
                 Ivac_all.append(1.0)
                 Nobs -= 1
 
@@ -1134,11 +1199,11 @@ class Hierarchical:
             M_i = self.detected_EMRIs[i]['true_params'][0]
             Fisher_inv = fishinv(M_i, Fisher)
 
-            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+            if (np.linalg.eigvals(Fisher_inv) <= 0.0).any():
                 Nobs -= 1
                 continue #skip invalid Fishers.
 
-            locparams = locparams_all[i]
+            locparams = locparams_all[i].copy()
             
             for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
                 if check_prior(locparams[j],bounds_loc[param]) == 1: #if the source parameters hits the upper limit
@@ -1154,29 +1219,33 @@ class Hierarchical:
 
             if out_of_bounds:
                 count+=1
-    
-            Iloc_i = Isource_loc(M=locparams[0],z=locparams[1], vec_l=[locparams[2],locparams[3]], 
-                                K=K, alpha=alpha, beta=beta, 
-                                f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
-                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
-                                Mstar=self.Mstar_truth)
-    
-            if out_of_bounds and self.out_of_bound_nature == 'remove':
+                
+            if (out_of_bounds) & (self.out_of_bound_nature == 'remove'):
                 Iloc_all.append(1.0)
                 Nobs -= 1
-                
-            elif np.isnan(Iloc_i):
-                Iloc_all.append(1.0)
-                Nobs -= 1
-                
-            else:
-                Iloc_all.append(Iloc_i)
+                    
+            else: 
+                Iloc_i = Isource_loc(M=locparams[0],z=locparams[1], vec_l=[locparams[2],locparams[3]], 
+                                    K=K, alpha=alpha, beta=beta, 
+                                    f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
+                                    Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
+                                    Mstar=self.Mstar_truth)
+        
+                if np.isnan(Iloc_i):
+                    Iloc_all.append(1.0)
+                    Nobs -= 1
+
+                elif Iloc_i <= 1e-200: #assuming fiducial baseline 'noisy' posterior value of 1e-200
+                    Iloc_all.append(1e-200)
+                    
+                else:
+                    Iloc_all.append(Iloc_i)
 
         lnposterior = np.sum(np.log(np.array(Iloc_all))) #avoid overflow by calculating log posterior
         if count > 0.0:
-            warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
+            print(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
         
-        return lnposterior
+        return np.log(factorial(Nobs - 1)) + lnposterior
 
     def source_integral_glob(self,K,alpha,beta,Gdot,Fishers_all,indices_all,globparams_all):
         
@@ -1194,18 +1263,19 @@ class Hierarchical:
     
         for i, index in zip(range(len(Fishers_all)),indices_all):
             out_of_bounds = False
+
             Fisher = Fishers_all[i] #Fisher in transformed coords [M,z,Al,nl,Ag]
 
             M_i = self.detected_EMRIs[i]['true_params'][0]
             Fisher_inv = fishinv(M_i, Fisher)
-
-            if (np.linalg.eigvals(Fisher_inv) < 0.0).any():
+ 
+            if (np.linalg.eigvals(Fisher_inv) <= 0.0).any():
                 Nobs -= 1
                 continue #skip invalid Fishers.
     
-            globparams = globparams_all[i] # Mglob, zglob, Alglob, nlglob, Agglob
+            globparams = globparams_all[i].copy() # Mglob, zglob, Alglob, nlglob, Agglob
             
-            for param,j in zip(bounds_glob.keys(),range(len(bounds_glob.keys()))):
+            for param, j in zip(bounds_glob.keys(),range(len(bounds_glob.keys()))):
                 if check_prior(globparams[j],bounds_glob[param]) == 1: #if the source parameters hits the upper limit
                     out_of_bounds = True
                     warnings.warn(f"source {index} is out of prior bounds on {param} (upper bound hit). \n\
@@ -1219,29 +1289,30 @@ class Hierarchical:
 
             if out_of_bounds:
                 count+=1
-    
-            Iglob_i = Isource_glob(M=globparams[0],z=globparams[1],Ag=globparams[-1],
-                                  K=K, alpha=alpha, beta=beta, 
-                                  Gdot=Gdot,Mstar=self.Mstar_truth,
-                                  Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
-                                    
-            if out_of_bounds and self.out_of_bound_nature == 'remove':
-                Iglob_all.append(1.0)
+                
+            if (out_of_bounds) & (self.out_of_bound_nature == 'remove'):
+                Iglob_all.append(0.0) #remember that Iglob_all is appending logIprod
+                print("removing out of bound source")
                 Nobs -= 1
+                continue
+        
+            lnIglob_i = lnIsource_glob(M=globparams[0],z=globparams[1],Ag=globparams[-1],
+                                K=K, alpha=alpha, beta=beta, 
+                                Gdot=Gdot,Mstar=self.Mstar_truth,
+                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
 
-            elif np.isnan(Iglob_i):
-                Iglob_all.append(1.0)
-                Nobs -= 1
+            if lnIglob_i <= np.log(1e-200): #assuming fiducial baseline 'noisy' posterior value of 1e-200
+                Iglob_all.append(np.log(1e-200))
                 
             else:
-                Iglob_all.append(Iglob_i)
+                Iglob_all.append(lnIglob_i)
 
-        lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
+        lnposterior = np.sum(np.array(Iglob_all)) #avoid overflow by calculating log posterior
 
         if count > 0.0:
-            warnings.warn(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
+            print(f"EMRIs out-of-bounds: {int(count)} out of total {int(len(Fishers_all))}")
 
-        return lnposterior
+        return np.log(factorial(Nobs - 1)) + lnposterior
 
     def savage_dickey_vacloc(self):
         #no seed ideally required for this calculation
@@ -1259,8 +1330,8 @@ class Hierarchical:
         K_samples, alpha_samples, beta_samples, f_samples, mu_Al_samples, mu_nl_samples, sigma_Al_samples, sigma_nl_samples = samples.T
 
         #make sure f_samples have at least 10% draws at the null value for SD calculation
-        f_samples = f_samples[:int(0.9*self.M_random)]
-        f_samples = np.concatenate((f_samples,np.zeros(self.M_random-len(f_samples))))
+        #f_samples = f_samples[:int(0.9*self.M_random)]
+        #f_samples = np.concatenate((f_samples,np.zeros(self.M_random-len(f_samples))))
 
         Fishers_all = []
         indices_all = []
@@ -1311,6 +1382,7 @@ class Hierarchical:
         removed_indices = []
     
         for j in tqdm(range(self.M_random)):
+
             lnprodIsource_j = self.source_integral_loc(K=K_samples[j],alpha=alpha_samples[j],beta=beta_samples[j],
                                                         f=f_samples[j],mu_Al=mu_Al_samples[j],mu_nl=mu_nl_samples[j],
                                                         sigma_Al=sigma_Al_samples[j],sigma_nl=sigma_nl_samples[j],
@@ -1322,8 +1394,8 @@ class Hierarchical:
         prodIsource = np.exp(lnprodIsource)
 
         for i in range(len(prodIsource)):
-            if prodIsource[i] < 1e-300: #control underflow
-                prodIsource[i] = 1e-300
+            if prodIsource[i] <= 1e-200: #control underflow
+                prodIsource[i] = 1e-200
         
         prodIsource = prodIsource/np.sum(prodIsource)
         
@@ -1331,12 +1403,12 @@ class Hierarchical:
         num_bins = 40
         mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
         
-        while sum(mask) < 10: #make sure at least ten sample point in the null hypothesis.
-            warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
-            num_bins -= 5
-            mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
+        #while sum(mask) < 10: #make sure at least ten sample point in the null hypothesis.
+        #    warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
+        #    num_bins -= 5
+        #    mask = np.abs(f_samples - 0.0) < (max(f_samples)-min(f_samples))/num_bins
         
-        prior_f0 = sum(mask)/len(prodIsource) #prior number of points within the bin for f = 0 
+        prior_f0 = sum(mask)/len(prodIsource) #prior number of points within the bin for f = 0 !!! Only works for uniform prior !!!
         posterior_f0 = np.sum(prodIsource[mask])
     
         print("prior_f0: ", prior_f0)
@@ -1420,8 +1492,8 @@ class Hierarchical:
         K_samples, alpha_samples, beta_samples, Gdot_samples = samples.T
 
         #make sure Gdot_samples have at least 10% draws at the null value for SD calculation
-        Gdot_samples = Gdot_samples[:int(0.9*self.M_random)]
-        Gdot_samples = np.concatenate((Gdot_samples,np.zeros(self.M_random-len(Gdot_samples))))
+        #Gdot_samples = Gdot_samples[:int(0.9*self.M_random)]
+        #Gdot_samples = np.concatenate((Gdot_samples,np.zeros(self.M_random-len(Gdot_samples))))
 
         indices_all = []
         Fishers_all = []
@@ -1468,7 +1540,8 @@ class Hierarchical:
                     warnings.warn(f"After KL-divergence validation, only {len(Fishers_all)} sources remain.")
     
         lnprodIsource = []
-        #removed_indices = []
+        removed_indices = []
+        
         for j in tqdm(range(self.M_random)):
                 
             lnprodIsource_j = self.source_integral_glob(K=K_samples[j], alpha=alpha_samples[j], beta=beta_samples[j],
@@ -1479,13 +1552,13 @@ class Hierarchical:
             lnprodIsource.append(lnprodIsource_j)
 
         #print(lnprodIsource, np.max(lnprodIsource))
-    
+
         lnprodIsource = np.array(lnprodIsource) - np.max(lnprodIsource)
         prodIsource = np.exp(lnprodIsource)
 
         for i in range(len(prodIsource)):
-            if prodIsource[i] < 1e-300: #control underflow
-                prodIsource[i] = 1e-300
+            if prodIsource[i] <= 1e-200: #control underflow
+                prodIsource[i] = 1e-200
                 
         prodIsource = prodIsource/np.sum(prodIsource)
             
@@ -1493,12 +1566,12 @@ class Hierarchical:
         num_bins = 40
         mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
 
-        while sum(mask) < 10: #make sure at least ten sample point in the null hypothesis.
-            warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
-            num_bins -= 5
-            mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
+        #while sum(mask) < 10: #make sure at least ten sample point in the null hypothesis.
+        #    warnings.warn("No samples consistent with the null hypothesis. Reducing bin size. The Bayes factor may be incorrect. Increase M_samples!")
+        #    num_bins -= 5
+        #    mask = np.abs(Gdot_samples - 0.0) < (max(Gdot_samples)-min(Gdot_samples))/num_bins
         
-        prior_Gdot0 = sum(mask)/self.M_random #prior number of points within the bin for Gdot = 0 
+        prior_Gdot0 = sum(mask)/self.M_random #prior number of points within the bin for Gdot = 0 !!! Only works for uniform prior !!!
         posterior_Gdot0 = np.sum(prodIsource[mask])
     
         print("prior_Gdot0: ", prior_Gdot0)
