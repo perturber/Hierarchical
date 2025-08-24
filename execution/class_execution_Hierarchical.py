@@ -1,19 +1,18 @@
 #imports
 import numpy as np
-import matplotlib.pyplot as plt
 
 from stableemrifisher.fisher import StableEMRIFisher
 
 from few.waveform import GenerateEMRIWaveform
 
 from fastlisaresponse import ResponseWrapper  # Response function 
-from lisatools.detector import EqualArmlengthOrbits #ESAOrbits correspond to esa-trailing-orbits.h5
+from lisatools.detector import EqualArmlengthOrbits
 from lisatools.sensitivity import get_sensitivity, A1TDISens, E1TDISens
 
 from hierarchical.Hierarchical_Class import Hierarchical
 from hierarchical.JointWave import JointKerrWaveform
 
-use_gpu = False
+use_gpu = True
 
 if not use_gpu:
     import few
@@ -155,7 +154,7 @@ hier = Hierarchical(Npop=Npop,SNR_thresh=SNR_thresh,sef=sef,sef_kwargs=sef_kwarg
                     filename=filename,filename_Fishers=filename_Fishers,
                     cosmo_params=cosmo_params,true_hyper=true_hyper,
                     source_bounds=source_bounds,hyper_bounds=hyper_bounds,Mstar=Mstar,
-                    T_LISA=T_LISA,make_nice_plots=True,M_random=int(5e2),
+                    T_LISA=T_LISA,make_nice_plots=True,M_random=int(2e3),
                     Fisher_validation_kwargs=Fisher_validation_kwargs, #for validation only
                    out_of_bound_nature='remove'
                    )
