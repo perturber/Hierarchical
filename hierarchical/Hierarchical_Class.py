@@ -183,7 +183,7 @@ def p0_samples_func(N,Msamps,musamps,asamps,Alsamps,nlsamps,Agsamps,Tsamps,seed,
                                musamps[i],
                                asamps[i],
                                0.0, #e0
-                               1.0, #Y0
+                               1.0, #YxI0
                                Alsamps[i],
                                8.0, #nlsamps[i],
                                Agsamps[i],
@@ -575,11 +575,11 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
 
     #tilde quantities
     Fisher_tilde = Fisher_psipsi + P.T @ Fisher_l @ P
-    mu_tilde = fishinv(M, Fisher_tilde) @ (Fisher_psipsi @ vec_psi + P.T @ Fisher_l @ mu_l)
+    psi_tilde = fishinv(M, Fisher_tilde) @ (Fisher_psipsi @ vec_psi + P.T @ Fisher_l @ mu_l)
     
-    M_tilde, z_tilde = mu_tilde[:2]
+    M_tilde, z_tilde = psi_tilde[:2]
 
-    #print(M, M_tilde, z, z_tilde, mu_tilde)
+    #print(M, M_tilde, z, z_tilde, psi_tilde)
 
     I2 = (f * 
           S * 
@@ -593,6 +593,7 @@ def Isource_loc(M, z, vec_l, K, alpha, beta, f, mu_l, sigma_l, Fisher, H0,Omega_
     #print(I1, I2)
     
     return I1 + I2
+
         
 #####################################################################################################
 #####################################################################################################
@@ -611,6 +612,7 @@ class Hierarchical:
     Args:
         Npop (int): Number of EMRIs in the true population.
         SNR_thresh (float): Signal-to-noise ratio threshold to claim 'detected' EMRI set.
+        sef (class): initialized insatnce of the StableEMRIFishers class object.
         sef_kwargs (dict): keyword arguments to provide to the StableEMRIFishers class. Must include:
                            'EMRI_waveform_gen', 'param_names'. All others optional.
 
@@ -647,7 +649,7 @@ class Hierarchical:
         Bloc_glob (float): Savage-Dickey ratio preferring the local over the global hypothesis.
     """
 
-    def __init__(self, Npop, SNR_thresh, sef_kwargs,
+    def __init__(self, Npop, SNR_thresh, sef, sef_kwargs,
                        filename,filename_Fishers=None,
                        true_hyper={'K':5e-3,'alpha':0.0,'beta':0.0,
                                    'f':0.0,'mu_Al':1e-5,'mu_nl':8.0,'sigma_Al':1e-6,'sigma_nl':0.8,
@@ -675,6 +677,7 @@ class Hierarchical:
 
         self.filename = filename
         self.filename_Fishers = os.path.join(self.filename,filename_Fishers)
+        self.sef = sef
         self.sef_kwargs = sef_kwargs
         self.sef_kwargs['filename'] = self.filename_Fishers
 
@@ -905,7 +908,7 @@ class Hierarchical:
             self.filename_Fishers_glob = self.Fisher_validation_kwargs['filename_Fishers_glob']
             validate = self.Fisher_validation_kwargs['validate']
 
-            fishervalidate = FisherValidation(self.sef_kwargs,
+            fishervalidate = FisherValidation(self.sef, self.sef_kwargs,
                      self.filename, filename_Fishers, self.filename_Fishers_loc, self.filename_Fishers_glob,
                      self.true_hyper, self.cosmo_params, self.source_bounds, self.hyper_bounds,
                      self.T_LISA, self.dt,
@@ -949,11 +952,12 @@ class Hierarchical:
             all_SNRs = []
                     
             for i in tqdm(range(self.Npop)):
+                sef_kwargs = self.sef_kwargs.copy()
                 M = self.M_truth_samples[i]
                 mu = self.mu_truth_samples[i]
                 a = self.a_truth_samples[i]
                 e0 = 0.0
-                Y0 = 1.0
+                xI0 = 1.0
                 dL = getdist(self.z_truth_samples[i],self.H0,self.Omega_m0,self.Omega_Lambda0) #Gpc
                 
                 qS = self.qS_truth_samples[i]
@@ -974,32 +978,36 @@ class Hierarchical:
     
                 p0 = self.p0_truth_samples[i]
     
-                self.sef_kwargs['suffix'] = i
+                sef_kwargs['suffix'] = i
     
-                param_list = [M,mu,a,p0,e0,Y0,
+                param_list = [M,mu,a,p0,e0,xI0,
                               dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
                               ] #SEF param args (vacuum-GR EMRI)
 
                 add_param_args = {"Al":Al, "nl":nl, "Ag":Ag, "ng":ng} #dict of additional parameters
-    
+                sef_kwargs['add_param_args'] = add_param_args
+
                 transformed_params = [M,self.z_truth_samples[i],Al,nl,Ag]
                 
-                emri_kwargs = {'T': T, 'dt': dt}
-    
-                #print(param_list, self.T_truth_samples[i])
+                emri_kwargs = {"T": T, "dt": dt}
+                sef_kwargs["T"] = T
+                sef_kwargs["dt"] = dt
                 
-                sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
-                all_SNRs.append(sef.SNRcalc_SEF())
-    
+                param_list_SNR = param_list + [Al, nl, Ag, ng] #param_list for SNR calculation (append all model params)
+                source_optimal_SNR = self.sef.SNRcalc_SEF(*param_list_SNR, **emri_kwargs) #calculate optimal SNR
+                all_SNRs.append(source_optimal_SNR)
+
+                print(all_SNRs[-1])
                 if all_SNRs[i] >= self.SNR_thresh:
                     self.detected_EMRIs.append({'index': i,'true_params': np.array(param_list),'SNR':all_SNRs[i], 
                                                 'lambda_v':self.lambda_truth_vac, 'lambda_l':self.lambda_truth_loc, 'lambda_g':self.lambda_truth_glob,
                                                'transformed_params':np.array(transformed_params)})
+                    #calculate and save the FIM for this source
                     try:
                         with h5py.File(f"{self.filename_Fishers}/Fisher_{i}.h5", "r") as f:
                             _ = f["Fisher"][:]
                     except FileNotFoundError:
-                        sef() #calculate and save the FIM for the detected EMRI
+                        self.sef(*param_list, **sef_kwargs) #calculate and save the FIM for the detected EMRI
     
             all_SNRs = np.array(all_SNRs)
             self.detected_EMRIs = np.array(self.detected_EMRIs)

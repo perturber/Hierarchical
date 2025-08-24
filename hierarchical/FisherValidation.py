@@ -53,7 +53,8 @@ def Fisher_KL(M, Gamma1, Gamma2, index_of_M = 0):
     Sigma1_det = np.linalg.det(Gamma1)
     Sigma2_det = np.linalg.det(Gamma2)
 
-    Gamma1_inv = fishinv(M, Gamma1, index_of_M)
+    #Gamma1_inv = fishinv(M, Gamma1, index_of_M)
+    Gamma1_inv = np.linalg.inv(Gamma1)
 
     dim = len(Gamma1)
 
@@ -65,7 +66,8 @@ class FisherValidation:
     Calculate the KL divergence between Fisher Information matrices at the true parameter point v/s at the bias-corrected point in a given hypothesis.
     
     args:
-    
+
+        sef (class): initialized StableEMRIFisher class.
         sef_kwargs (dict): arguments for initializing the StableEMRIFisher class.
         filename (string): folder name where the data is being stored. No default because impractical to not save results.
         filename_Fishers (string): a sub-folder for storing Fisher files (book-keeping). If None, Fishers directly stored in filename.
@@ -88,7 +90,7 @@ class FisherValidation:
         plot_KL (bool): plot the KL divergences on all param indices. Default is False.
     """
 
-    def __init__(self, sef_kwargs,
+    def __init__(self, sef, sef_kwargs,
                  filename, filename_Fishers, filename_Fishers_loc, filename_Fishers_glob,
                  true_hyper, cosmo_params, source_bounds, hyper_bounds,
                  T_LISA, dt,
@@ -99,6 +101,7 @@ class FisherValidation:
         self.filename_Fishers_loc = os.path.join(filename,filename_Fishers_loc)
         self.filename_Fishers_glob = os.path.join(filename,filename_Fishers_glob)
         
+        self.sef= sef
         self.sef_kwargs = sef_kwargs
 
         self.detected_EMRIs = np.load(f'{self.filename}/detected_EMRIs.npy', allow_pickle=True)
@@ -164,9 +167,7 @@ class FisherValidation:
         
                 T = self.T_LISA
                 dt = self.dt
-        
-                emri_kwargs = {'T': T, 'dt': dt}
-        
+                
                 param_list = [M,mu,a,p0,e0,Y0,
                               dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
                              ]
@@ -177,18 +178,21 @@ class FisherValidation:
 
                 if not out_of_bounds:                                     
                     
+                    sef_kwargs = self.sef_kwargs.copy()
+
                     print("now validating local hypothesis Fishers for params: ", param_list + list(add_param_args.values()))
             
-                    self.sef_kwargs['filename'] = self.filename_Fishers_loc
-                    self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
-            
-                    sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
+                    sef_kwargs['filename'] = self.filename_Fishers_loc
+                    sef_kwargs['suffix'] = detected_EMRIs[i]['index']
+                    sef_kwargs['add_param_args'] = add_param_args
+                    sef_kwargs['T'] = T
+                    sef_kwargs['dt'] = dt
 
                     try:
                         with h5py.File(f"{self.filename_Fishers_loc}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
                             _ = f["Fisher"][:]
                     except FileNotFoundError:
-                        sef() #calculate and save the FIM
+                        self.sef(*param_list, **sef_kwargs) #calculate and save the FIM
     
         #calculate Fishers at the biased point in the global hypothesis
         if self.true_hyper['Gdot'] > 0.0:
@@ -216,9 +220,7 @@ class FisherValidation:
         
                 T = self.T_LISA
                 dt = self.dt
-        
-                emri_kwargs = {'T': T, 'dt': dt}
-        
+                
                 param_list = [M,mu,a,p0,e0,Y0,
                               dL,qS,phiS,qK,phiK,Phi_phi0,Phi_theta0,Phi_r0,
                              ]
@@ -233,16 +235,19 @@ class FisherValidation:
 
                     print("now validating global hypothesis Fishers for params: ", param_list + list(add_param_args.values()))
             
-                    self.sef_kwargs['filename'] = self.filename_Fishers_glob
-                    self.sef_kwargs['suffix'] = detected_EMRIs[i]['index']
-            
-                    sef = StableEMRIFisher(*param_list, add_param_args=add_param_args, **emri_kwargs, **self.sef_kwargs)
+                    sef_kwargs = self.sef_kwargs.copy()
+                    
+                    sef_kwargs['filename'] = self.filename_Fishers_glob
+                    sef_kwargs['suffix'] = detected_EMRIs[i]['index']
+                    sef_kwargs['add_param_args'] = add_param_args
+                    sef_kwargs['T'] = T
+                    sef_kwargs['dt'] = dt
 
                     try:
                         with h5py.File(f"{self.filename_Fishers_glob}/Fisher_{detected_EMRIs[i]['index']}.h5", "r") as f:
                             _ = f["Fisher"][:]
                     except FileNotFoundError:
-                        sef() #calculate and save the FIM
+                        self.sef(*param_list, **sef_kwargs) #calculate and save the FIM
 
     def transform_Fisher_at_bias(self):
 
