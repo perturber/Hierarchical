@@ -72,15 +72,17 @@ def getz(dl,H0,Omega_m0,Omega_Lambda0):
     
 def Jacobian(M,dist,H0,Omega_m0,Omega_Lambda0):
     """ 
-    Jacobian for Fisher parameter transformation from [M,dist,Al,nl,Ag] to [M,z,Al,nl,Ag]
+    Jacobian for Fisher parameter transformation from [M,dist,Al,nl,Ag] to [lnM,z,Al,nl,Ag]
     Returns a 5x5 diagonal np.ndarray.
     """
     
     #Jacobian = partial old/partial new
     
-    delta = dist*1e-5
+    delta = max(dist*1e-5, 1e-6)
+    
     del_z_del_dist = ((getz(dist+delta,H0,Omega_m0,Omega_Lambda0)-getz(dist-delta,H0,Omega_m0,Omega_Lambda0))/(2*delta))
-    diag = np.diag((1.0,(del_z_del_dist)**-1,1.0,1.0,1.0))
+    
+    diag = np.diag((M,(del_z_del_dist)**-1,1.0,1.0,1.0))
     
     return diag
 

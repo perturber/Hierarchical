@@ -59,7 +59,7 @@ class JointRelKerrEccFlux(KerrEccEqFlux):
         #ydot = [pdot, edot, xdot, Op, Ot, Or]
 
         p, e, x = y[:3]
-
+        
         #calculate Ldot due to extra effects here
         Ldot_local = self.Al * (p / 10.) ** self.nl
         
