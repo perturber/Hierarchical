@@ -20,6 +20,6 @@ To reproduce the results from the paper, download the datafiles [here](https://z
 Additionally, the *execution* folder contains all files used to generate the populations and perform the analysis. Here's a brief description of the different files:
 
 - `execution/class_execution_Hierarchical.py`: execution file with fixed f and Gdot in the true population (single evaluation).
-- `execution/class_execution_varied_f.py`: execution file for trend where the fractional EMRIs with a local effect, f, varies from 0 to 1. Gdot (global effect amplitude) is fixed to 1e-13.
+- `execution/class_execution_varied_f.py`: execution file for trend where the fractional EMRIs with a local effect, f, varies from 0 to 1. Gdot (global effect amplitude) is fixed to 1e-12.
 - `execution/class_execution_varied_Gdot.py`: execution file where the global effect amplitude (Gdot) varies. f is fixed to 0.5.
 
