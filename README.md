@@ -24,6 +24,7 @@ Additionally, the *execution* folder contains all files used to generate the pop
 - `execution/class_execution_varied_Gdot.py`: execution file where the global effect amplitude (Gdot) varies. f is fixed to 0.5.
 
 ### Cite the repository
+```
 @software{kejriwal_2025_hier,
   author       = {Shubham Kejriwal and
                   Enrico Barausse and
@@ -34,3 +35,4 @@ Additionally, the *execution* folder contains all files used to generate the pop
   year         = "manuscript in preparation",
   url          = {https://github.com/perturber/Hierarchical/}
 }
+```
