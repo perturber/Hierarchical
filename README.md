@@ -23,3 +23,14 @@ Additionally, the *execution* folder contains all files used to generate the pop
 - `execution/class_execution_varied_f.py`: execution file for trend where the fractional EMRIs with a local effect, f, varies from 0 to 1. Gdot (global effect amplitude) is fixed to 1e-12.
 - `execution/class_execution_varied_Gdot.py`: execution file where the global effect amplitude (Gdot) varies. f is fixed to 0.5.
 
+### Cite the repository
+@software{kejriwal_2025_hier,
+  author       = {Shubham Kejriwal and
+                  Enrico Barausse and
+                  Alvin J. K. Chua
+                  },
+  title        = {Hierarchical},
+  publisher    = {Github},
+  year         = "manuscript in preparation",
+  url          = {https://github.com/perturber/Hierarchical/}
+}
