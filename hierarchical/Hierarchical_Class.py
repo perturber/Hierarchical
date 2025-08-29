@@ -926,17 +926,18 @@ class Hierarchical:
             plt.close()
 
             fig, axs = plt.subplots(1,2,figsize=(10,5), sharey=True)
-            axs[0].hist(self.lnM_truth_samples, bins=50, histtype='stepfilled', edgecolor='k', color='grey', alpha = 0.5, label='truth')
-            axs[0].hist(self.lnM_truth_samples[indices_detected], bins=50, histtype='stepfilled', edgecolor='k', color='orange', label='detected')
-            axs[0].set_xlabel(r"$\log(m_1)$",fontsize=16)
+            axs[0].hist(self.lnM_truth_samples, bins=20, histtype='stepfilled', edgecolor='k', color='grey', alpha = 0.5, label='truth')
+            axs[0].hist(self.lnM_truth_samples[indices_detected], bins=20, histtype='stepfilled', edgecolor='k', color='orange', label='detected')
+            axs[0].set_xlabel(r"$\log(M))$",fontsize=16)
             axs[0].tick_params(axis='both', which='major', labelsize=14)
 
-            axs[1].hist(self.z_truth_samples, bins=50, histtype='stepfilled', edgecolor='k', color='grey', alpha = 0.5, label='truth')
-            axs[1].hist(self.z_truth_samples[indices_detected], bins=50, histtype='stepfilled', edgecolor='k', color='orange', label='detected')
+            axs[1].hist(self.z_truth_samples, bins=20, histtype='stepfilled', edgecolor='k', color='grey', alpha = 0.5, label='truth')
+            axs[1].hist(self.z_truth_samples[indices_detected], bins=20, histtype='stepfilled', edgecolor='k', color='orange', label='detected')
             axs[1].set_xlabel(r"$z$", fontsize=16)
             axs[1].tick_params(axis='both', which='major', labelsize=14)
             
             plt.savefig(f'{self.plots_folder}/M_z_truth_vs_detected.png',dpi=300,bbox_inches='tight')
+            plt.savefig(f'{self.plots_folder}/M_z_truth_vs_detected.pdf',dpi=300,bbox_inches='tight') #for the paper.
             plt.close()
 
         if self.make_nice_plots:
