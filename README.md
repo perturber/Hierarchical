@@ -15,7 +15,7 @@ The main hieararchical Class is hosted inside the *hierarchical* folder. Here's 
 - `hierarchical/FisherValidation.py`: script file that can validate Fishers calculated at the true parameter point and the biased-inference point using KL-divergence. If KL is above a given threshold, the Fishers at the two points are assumed to be 'too different', breaking the linear-signal approximation. Validation can be performed from the Hierarchical class in Hierarchical_class.py.
 - `hierarchical/utility.py`: various utility functions (cosmology, analysis) used by `Hierarchical_Class.py` and `FisherValidation.py`.
 
-To reproduce the results from the paper, download the datafiles [here](https://zenodo.org/records/15362412?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6IjY2N2RjZjkwLTdjYmYtNDEyMi05YjI2LWNiYTFjNTg0MzFiNSIsImRhdGEiOnt9LCJyYW5kb20iOiI0NzI1ODIxM2U1YWVlNjQ2ZTY0YjA3NjU1Njg1YTliMyJ9.FioeGIWlXePv3N0ozFbiWZOgCARcYeYx-J6y4Yy1DJ_xrVVVB5paCgbrXQBoyOj_Lpm7tl5zX-vjwelFDJkF5Q) and unzip contents. Execute notebooks in the *results* folder to replot everything. 
+To reproduce the results from the paper, download the datafiles [here](https://zenodo.org/records/16066307?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6IjY2N2RjZjkwLTdjYmYtNDEyMi05YjI2LWNiYTFjNTg0MzFiNSIsImRhdGEiOnt9LCJyYW5kb20iOiI0NzI1ODIxM2U1YWVlNjQ2ZTY0YjA3NjU1Njg1YTliMyJ9.FioeGIWlXePv3N0ozFbiWZOgCARcYeYx-J6y4Yy1DJ_xrVVVB5paCgbrXQBoyOj_Lpm7tl5zX-vjwelFDJkF5Q) and unzip contents.
 
 Additionally, the *execution* folder contains all files used to generate the populations and perform the analysis. Here's a brief description of the different files:
 
