@@ -563,7 +563,7 @@ class Hierarchical:
                                    'Gdot':0.0},
                        cosmo_params={'Omega_m0':0.30,'Omega_Lambda0':0.70,'H0':70e3}, 
                        source_bounds={'lnM':[np.log(1e4),np.log(1e7)],'z':[0.01,10.0],'Al':[0.0,1e-4],'nl':[0.0,10.0],'Ag':[0.0,1e-8]},
-                       out_of_bound_nature = None,
+                       out_of_bound_nature = 'remove',
                        hyper_bounds={'K':[1e-3,1e-2],'alpha':[-0.5,0.5],'beta':[-0.5,0.5],
                                      'f':[0.0,1.0],'mu_Al':[1e-5,1e-5],'mu_nl':[8.0,8.0],'sigma_Al':[1e-6,1e-6],'sigma_nl':[0.8,0.8],
                                      'Gdot':[0.0,1e-8]},
@@ -653,8 +653,8 @@ class Hierarchical:
         if (out_of_bound_nature == None) or (out_of_bound_nature in ['edge', 'remove']):
             self.out_of_bound_nature = out_of_bound_nature
         else:
-            warnings.warn("valid option for out_of_bound_nature: ['edge','remove', None]. Assuming default (None).")
-            self.out_of_bound_nature = None
+            warnings.warn("valid option for out_of_bound_nature: ['edge','remove', None]. Assuming default (remove).")
+            self.out_of_bound_nature = 'remove'
             
         self.make_nice_plots = make_nice_plots
 
@@ -925,17 +925,19 @@ class Hierarchical:
             plt.savefig(f'{self.plots_folder}/M_z_truth.pdf',dpi=300,bbox_inches='tight') #for the paper
             plt.close()
 
+            #vacuum-GR parameters
             fig, axs = plt.subplots(1,2,figsize=(10,5), sharey=True)
             axs[0].hist(self.lnM_truth_samples, bins=20, histtype='stepfilled', edgecolor='k', color='grey', alpha = 0.5, label='truth')
             axs[0].hist(self.lnM_truth_samples[indices_detected], bins=20, histtype='stepfilled', edgecolor='k', color='orange', label='detected')
-            axs[0].set_xlabel(r"$\log(M))$",fontsize=16)
-            axs[0].tick_params(axis='both', which='major', labelsize=14)
+            axs[0].set_xlabel(r"$\log(M)$",fontsize=20)
+            axs[0].tick_params(axis='both', which='major', labelsize=16)
 
             axs[1].hist(self.z_truth_samples, bins=20, histtype='stepfilled', edgecolor='k', color='grey', alpha = 0.5, label='truth')
             axs[1].hist(self.z_truth_samples[indices_detected], bins=20, histtype='stepfilled', edgecolor='k', color='orange', label='detected')
-            axs[1].set_xlabel(r"$z$", fontsize=16)
-            axs[1].tick_params(axis='both', which='major', labelsize=14)
+            axs[1].set_xlabel(r"$z$", fontsize=20)
+            axs[1].tick_params(axis='both', which='major', labelsize=16)
             
+            plt.subplots_adjust(hspace=0.5)
             plt.savefig(f'{self.plots_folder}/M_z_truth_vs_detected.png',dpi=300,bbox_inches='tight')
             plt.savefig(f'{self.plots_folder}/M_z_truth_vs_detected.pdf',dpi=300,bbox_inches='tight') #for the paper.
             plt.close()
@@ -1116,7 +1118,7 @@ class Hierarchical:
             #check prior bounds on all model parameters.
             #out_of_bound_nature for nl is always "edge" because of the way it contributes in the model.
             if not out_of_bound_nature is None:
-                for param,j in zip(bounds_loc.keys(),range(len(bounds_loc.keys()))):
+                for param,j in zip(bounds_loc.keys(),[0,1,2,3]):
                     if param == 'nl':
                         out_of_bound_nature = 'edge'
 
@@ -1140,20 +1142,28 @@ class Hierarchical:
                 Iloc_all.append(1.0)
                     
             else: 
-                Iloc_i = Isource_loc(lnM=locparams[0],z=locparams[1], vec_l=[locparams[2],locparams[3]], 
-                                    K=K, alpha=alpha, beta=beta, 
-                                    f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
-                                    Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
-                                    Mstar=self.Mstar_truth)
-        
-                if np.isnan(Iloc_i):
-                    Iloc_all.append(1.0)
+                try: #catch runtime warnings (overflow, invalid value etc)
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("error", category=RuntimeWarning)
 
-                elif Iloc_i <= 1e-200: #assuming fiducial baseline 'noisy' posterior value of 1e-200
-                    Iloc_all.append(1e-200)
-                    
-                else:
-                    Iloc_all.append(Iloc_i)
+                        Iloc_i = Isource_loc(lnM=locparams[0],z=locparams[1], vec_l=[locparams[2],locparams[3]], 
+                                            K=K, alpha=alpha, beta=beta, 
+                                            f=f, mu_l=[mu_Al,mu_nl], sigma_l=[sigma_Al,sigma_nl], 
+                                            Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0,
+                                            Mstar=self.Mstar_truth)
+                
+                        if np.isnan(Iloc_i):
+                            Iloc_all.append(1.0)
+
+                        elif Iloc_i <= 1e-200: #assuming fiducial baseline 'noisy' posterior value of 1e-200
+                            Iloc_all.append(1e-200)
+                            
+                        else:
+                            Iloc_all.append(Iloc_i)
+
+                except (RuntimeWarning, ValueError, FloatingPointError) as e:
+                    Iloc_all.append(1.0)
+                    continue
 
         lnposterior = np.sum(np.log(np.array(Iloc_all))) #avoid overflow by calculating log posterior
         
@@ -1179,8 +1189,11 @@ class Hierarchical:
 
             globparams = globparams_all[i].copy() #ln Mglob, zglob, Alglob, nlglob, Agglob
             
-            if not self.out_of_bound_nature is None:
-                for param, j in zip(bounds_glob.keys(),range(len(bounds_glob.keys()))):
+            out_of_bound_nature = self.out_of_bound_nature
+            
+            if not out_of_bound_nature is None:
+                for param,j in zip(bounds_glob.keys(),[0,1,4]):
+                    warnings.warn(f"check prior result for param {param}: {check_prior(globparams[j],bounds_glob[param])}")
                     if check_prior(globparams[j],bounds_glob[param]) == 1: #if the source parameters hits the upper limit
                         out_of_bounds = True
                         warnings.warn(f"source {index} is out of prior bounds on {param} (upper bound hit). \n\
@@ -1195,22 +1208,32 @@ class Hierarchical:
                             globparams[j] = bounds_glob[param][0] #vacparam takes the lower limit value
 
                 if out_of_bounds:
+                    warnings.warn("out of bounds triggered!")
                     count+=1
                     
                 if (out_of_bounds) & (self.out_of_bound_nature == 'remove'):
-                    Iglob_all.append(0.0)
+                    warnings.warn("source removed!")
+                    Iglob_all.append(1e-200) #noisy baseline posterior value
                     continue
         
-            Iglob_i = Isource_glob(lnM=globparams[0],z=globparams[1],Ag=globparams[-1],
-                                K=K, alpha=alpha, beta=beta, 
-                                Gdot=Gdot,Mstar=self.Mstar_truth,
-                                Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
-            
-            if Iglob_i <= (1e-200): #assuming fiducial baseline 'noisy' posterior value of 1e-200
-                Iglob_all.append((1e-200))
-                
-            else:
-                Iglob_all.append(Iglob_i)
+            try: #catch runtime warnings (overflow, invalid value etc)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("error", category=RuntimeWarning)
+
+                    Iglob_i = Isource_glob(lnM=globparams[0],z=globparams[1],Ag=globparams[-1],
+                                        K=K, alpha=alpha, beta=beta, 
+                                        Gdot=Gdot,Mstar=self.Mstar_truth,
+                                        Fisher=Fisher,H0=self.H0,Omega_m0=self.Omega_m0,Omega_Lambda0=self.Omega_Lambda0)
+                    
+                    if Iglob_i <= (1e-200): #assuming fiducial baseline 'noisy' posterior value of 1e-200
+                        Iglob_all.append((1e-200))
+                        
+                    else:
+                        Iglob_all.append(Iglob_i)
+
+            except (RuntimeWarning, ValueError, FloatingPointError) as e:
+                Iglob_all.append(1e-200)
+                continue
 
         lnposterior = np.sum(np.log(np.array(Iglob_all))) #avoid overflow by calculating log posterior
 
@@ -1355,14 +1378,13 @@ class Hierarchical:
             plt.savefig(f"{self.plots_folder}/posterior_vacparams_f.png",dpi=300,bbox_inches='tight')
             plt.close()
 
-
             plt.figure(figsize=(7,5))
-            plt.scatter(f_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
-            plt.scatter(f_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            plt.scatter(f_samples, prodIsource, color='grey',alpha=0.5,label='all posterior samples')
+            #plt.scatter(f_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.f_truth,color='k',linestyle='--',label='truth')
             plt.xlabel(r"$f$", fontsize=16)
             plt.ylabel(r"$p(f|\mathcal{D})$",fontsize=16)
-            plt.yscale('log')
+            #plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_f.png",dpi=300,bbox_inches='tight')
             plt.close()
@@ -1410,8 +1432,11 @@ class Hierarchical:
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_loc_sigmanl.png",dpi=300,bbox_inches='tight')
             plt.close()
-        
-        return posterior_f0 / prior_f0
+
+        if prior_f0 == 0:
+            return np.inf
+        else:
+            return posterior_f0 / prior_f0
     
     def savage_dickey_vacglob(self):
         #no seed ideally required for this calculation
@@ -1545,16 +1570,19 @@ class Hierarchical:
 
             plt.figure(figsize=(7,5))
             plt.scatter(Gdot_samples, prodIsource,color='grey',alpha=0.5,label='all posterior samples')
-            plt.scatter(Gdot_samples[mask],prodIsource[mask],color='red',alpha=0.5,label='posterior consistent with null')
+            #plt.scatter(Gdot_samples[mask],np.exp(prodIsource[mask]),color='red',alpha=0.5,label='posterior consistent with null')
             plt.axvline(self.Gdot_truth,color='k',linestyle='--',label='truth')
             plt.xlabel(r"$\bar{A}_g$",fontsize=16) #Gdot -> barA_g name changed for paper plots
             plt.ylabel(r"$p(\bar{A}_g|\mathcal{D})$",fontsize=16) #Gdot -> barA_g name changed for paper plots
-            plt.yscale('log')
+            #plt.yscale('log')
             plt.legend()
             plt.savefig(f"{self.plots_folder}/posterior_vac_glob.png",dpi=300,bbox_inches='tight')
             plt.close()
         
-        return posterior_Gdot0 / prior_Gdot0
+        if prior_Gdot0 == 0:
+            return np.inf
+        else:
+            return posterior_Gdot0 / prior_Gdot0
 
     def corner_plot_biases(self):
         Fisher_index = []
