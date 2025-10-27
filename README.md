@@ -1,5 +1,5 @@
 # Hierarchical_BeyondvacGR
-Decoupling local and global Beyond vacuum-GR effects in EMRIs with hierarchical modeling.
+Decoupling local and global Beyond vacuum-GR effects in EMRIs with hierarchical modeling. Used for the analysis in this paper: [arxiv/2510.17398](https://arxiv.org/abs/2510.17398)
 
 ## Installation Guide
 
@@ -23,8 +23,18 @@ Additionally, the *execution* folder contains all files used to generate the pop
 - `execution/class_execution_varied_f.py`: execution file for trend where the fractional EMRIs with a local effect, f, varies from 0 to 1. Gdot (global effect amplitude) is fixed to 1e-12.
 - `execution/class_execution_varied_Gdot.py`: execution file where the global effect amplitude (Gdot) varies. f is fixed to 0.5.
 
-### Cite the repository
+### Citations
 ```
+@article{Kejriwal:2025jao,
+    author = "Kejriwal, Shubham and Barausse, Enrico and Chua, Alvin J. K.",
+    title = "{Hierarchical modeling of gravitational-wave populations for disentangling environmental and modified-gravity effects}",
+    eprint = "2510.17398",
+    archivePrefix = "arXiv",
+    primaryClass = "gr-qc",
+    month = "10",
+    year = "2025"
+}
+
 @software{kejriwal_2025_hier,
   author       = {Shubham Kejriwal and
                   Enrico Barausse and
