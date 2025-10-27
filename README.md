@@ -34,15 +34,5 @@ Additionally, the *execution* folder contains all files used to generate the pop
     month = "10",
     year = "2025"
 }
-
-@software{kejriwal_2025_hier,
-  author       = {Shubham Kejriwal and
-                  Enrico Barausse and
-                  Alvin J. K. Chua
-                  },
-  title        = {Hierarchical},
-  publisher    = {Github},
-  year         = "manuscript in preparation",
-  url          = {https://github.com/perturber/Hierarchical/}
 }
 ```
