@@ -34,5 +34,5 @@ Additionally, the *execution* folder contains all files used to generate the pop
     month = "10",
     year = "2025"
 }
-}
+
 ```
